@@ -124,4 +124,4 @@ skips otherwise. Contributions must keep every secret value out of the repositor
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

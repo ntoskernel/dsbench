@@ -3,8 +3,8 @@ name = "dsbench"
 version = "0.1.0"
 description = "Black-box benchmark harness for the DeepSecrets secrets scanner on labelled corpora such as SecretBench"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Nikolai Khechumov", email = "khechumov@gmail.com" },
 ]
