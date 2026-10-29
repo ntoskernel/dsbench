@@ -66,6 +66,7 @@ dsbench run --resume <run_id>          # continue an interrupted run with its ow
 dsbench match --run <run_id>           # pair findings with labels again (after a matcher change)
 dsbench match --run <run_id> --matcher located --processes 16   # one matcher, its corpus reads in 16 processes
 dsbench metrics --run <run_id>         # count again: metrics.json and summary.md
+dsbench diagnose --run <run_id>        # why it missed and what it reported, from the scanner's own tracer
 ```
 
 A run id is `<YYYYMMDD>-<HHMMSS>-<profile>`; `--label` names the build under test in the run's parameters.
@@ -138,6 +139,18 @@ the numeric confidence is stored beside the tier.
 
 Every stored pair carries the matcher's version; `metrics` refuses pairs from another version, so a matcher change
 means `dsbench match` again, never a silent mix.
+
+## Diagnosis
+
+`diagnose --run RUN` asks the scanner why. DeepSecrets' source trees (from 2.2) hold a tracer, `python -m
+deepsecrets.diagnostics trace`, that replays a file through the scan pipeline and names the first stage that explains
+a value: reported, a detection rule that never matched, a scoring rule that rejected it, the size tier, and so on.
+dsbench runs it as a subprocess of the measured tree, with the run's interpreter, after checking that the tree still
+has the source digest the run recorded. It traces every missed real group and every charged look-alike group, a
+seeded sample of found groups for contrast and a sample of findings outside the labels, each file at its view path as
+the scanner saw it. Cases and traces hold real values and stay in `runs/<id>/private/diagnosis/`; `diagnosis.json`
+holds the verdicts per kind, the regex-candidate rules that rejected labelled values and a rule ledger from the
+tracer's single-rule counterfactuals. `--reuse-traces` analyses stored traces again.
 
 ## The June 2026 table
 

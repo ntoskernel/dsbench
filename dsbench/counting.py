@@ -29,6 +29,7 @@ A run of a sample counts only the labels of the files it scanned."""
 
 import json
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 import duckdb
@@ -110,14 +111,23 @@ LEVEL_CUTS = {level: TIER_RANK[level] for level in LEVELS}
 CONFIDENCE_CUTS = {str(c): c for c in range(11)}
 
 
-def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]], cuts: Optional[Dict[str, int]] = None) -> Dict:
-    """Each view at each cut: a pair counts at a cut when its score (the finding's tier rank, or its confidence)
-    reaches the cut. The reliability table needs tier ranks, so it comes only with the level cuts."""
-    by_tier = cuts is None
-    cuts = LEVEL_CUTS if cuts is None else cuts
+@dataclass
+class Outcome:
+    """Per row, group and unit, the best score at which it is found (real) or charged (look-alike)."""
+
+    found: Dict[int, int]
+    charged: Dict[int, int]
+    group_found: Dict[int, int]
+    group_charged: Dict[int, int]
+    unit_found: Dict[Tuple[str, str], int]
+    unit_charged: Dict[Tuple[str, str], int]
+
+
+def outcome(labels: Labels, pairs: List[Tuple[int, int, bool, int]]) -> Outcome:
+    """The counting rules: a finding paired with a Y row finds it; one paired with an N row charges it unless the same
+    finding is paired with any Y row, or the row is a fragment the finding encloses."""
     pairs = [p for p in pairs if p[1] in labels.real and p[3] is not None]
     hits_real = {f for f, row, _, _ in pairs if labels.real[row]}
-    # per row, the best rank at which it is found or charged
     found: Dict[int, int] = {}
     charged: Dict[int, int] = {}
     for f, row, enc, rank in pairs:
@@ -142,6 +152,18 @@ def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]], cuts: Optiona
             unit_found[u] = max(unit_found.get(u, -1), group_found[g])
         if not labels.real_unit[u] and g in group_charged:
             unit_charged[u] = max(unit_charged.get(u, -1), group_charged[g])
+    return Outcome(found, charged, group_found, group_charged, unit_found, unit_charged)
+
+
+def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]], cuts: Optional[Dict[str, int]] = None) -> Dict:
+    """Each view at each cut: a pair counts at a cut when its score (the finding's tier rank, or its confidence)
+    reaches the cut. The reliability table needs tier ranks, so it comes only with the level cuts."""
+    by_tier = cuts is None
+    cuts = LEVEL_CUTS if cuts is None else cuts
+    o = outcome(labels, pairs)
+    found, charged = o.found, o.charged
+    group_found, group_charged, unit_found, unit_charged = o.group_found, o.group_charged, o.unit_found, o.unit_charged
+    pairs = [p for p in pairs if p[1] in labels.real and p[3] is not None]
 
     n_rows = Counter(labels.real.values())
     n_groups = Counter(labels.real_group.values())

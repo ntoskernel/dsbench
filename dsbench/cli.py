@@ -14,6 +14,7 @@ import duckdb
 
 from dsbench import __version__
 from dsbench.dataset import DatasetError
+from dsbench.diagnose import DiagnoseError
 from dsbench.doctor import FAIL, run_doctor
 from dsbench.home import HomeError, resolve_home
 from dsbench.legacy import june, pgcopy
@@ -257,6 +258,34 @@ def cmd_metrics(args) -> int:
     return 0
 
 
+def cmd_diagnose(args) -> int:
+    from dsbench.diagnose import diagnose
+    from dsbench.store import connect
+
+    home = resolve_home(args.home)
+    with connect(home) as con:
+        d = diagnose(
+            con,
+            home,
+            args.run,
+            processes=args.processes,
+            contrast=args.contrast,
+            extras=args.extras,
+            seed=args.seed,
+            max_file_mb=args.max_file_mb,
+            reuse_traces=args.reuse_traces,
+        )
+    print(f"traced {', '.join(f'{n:,} {k}' for k, n in d['traced'].items())} (schema {', '.join(d['schemas'])})")
+    for kind in ('miss', 'lookalike'):
+        verdicts = d['verdicts'].get(kind, {})
+        if verdicts:
+            print(f'{kind}, by the first stage that explains it:')
+            for name, n in verdicts.items():
+                print(f'  {n:>6,}  {name}')
+    print(f'written: {home.run_dir(args.run) / "private" / "diagnosis" / "diagnosis.json"}')
+    return 0
+
+
 def _progress_path(home, run_id: Optional[str]) -> Optional[Path]:
     """The run's progress.json, or else the most recently updated one of a running run, or else of any run."""
     if run_id:
@@ -434,6 +463,16 @@ def build_parser() -> argparse.ArgumentParser:
     metrics.add_argument('--run', required=True)
     metrics.set_defaults(func=cmd_metrics)
 
+    diag = sub.add_parser('diagnose', help="trace a run's misses and charged look-alikes through the scanner's tracer")
+    diag.add_argument('--run', required=True)
+    diag.add_argument('--processes', type=int, default=8, help='tracer processes (default: 8)')
+    diag.add_argument('--contrast', type=int, default=2000, help='found real groups to trace for contrast')
+    diag.add_argument('--extras', type=int, default=1000, help='unlabelled findings to trace')
+    diag.add_argument('--seed', type=int, default=1, help='the seed of both samples (default: 1)')
+    diag.add_argument('--max-file-mb', type=float, default=20.0, help='larger files are not traced (default: 20)')
+    diag.add_argument('--reuse-traces', action='store_true', help='analyse the stored traces again without tracing')
+    diag.set_defaults(func=cmd_diagnose)
+
     status = sub.add_parser('status', help='datasets and runs')
     status.set_defaults(func=cmd_status)
 
@@ -458,6 +497,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         RunError,
         MatcherError,
         MetricsError,
+        DiagnoseError,
     ) as e:
         print(f'dsbench: {e}', file=sys.stderr)
         return 1
