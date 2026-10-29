@@ -5,7 +5,9 @@ home and nowhere else.
 Pairs carry `matches.matcher_version`, so pairs from another matcher version are never counted; `artifacts.depth`
 is the size tier the scanner applied to a file; `errors` holds one row per error notification the scanner reported,
 and `artifacts.errors` counts a file's notifications. `findings.tier` is the scanner's own tier for a finding and
-`findings.tags` its `properties.tags` as a JSON list. Columns added after a store was created arrive through
+`findings.tags` its `properties.tags` as a JSON list. `label_spans` is where the `located` matcher found each label
+(per dataset, recomputed when that matcher's version changes); a `located` pair stores in `matches.tier` how its label
+was located and in `matches.encloses` whether the finding covers the label and more. Columns added after a store was created arrive through
 `MIGRATIONS`, which every writing connection applies. Bulk inserts go through NDJSON staged in the bench home's `tmp/`, which DuckDB reads in one pass
 and dsbench deletes at once, since the rows can hold secrets."""
 
@@ -54,7 +56,11 @@ DDL = [
         fingerprint VARCHAR, tier VARCHAR, tags VARCHAR, PRIMARY KEY (run_id, finding_id))''',
     '''CREATE TABLE IF NOT EXISTS matches (
         run_id VARCHAR, matcher VARCHAR, matcher_version VARCHAR, finding_id BIGINT, row_id BIGINT, tier VARCHAR,
-        line_delta INTEGER, PRIMARY KEY (run_id, matcher, finding_id, row_id))''',
+        line_delta INTEGER, encloses BOOLEAN, PRIMARY KEY (run_id, matcher, finding_id, row_id))''',
+    # where the `located` matcher found each label, per matcher version; offsets into the text the scanner read
+    '''CREATE TABLE IF NOT EXISTS label_spans (
+        dataset_id VARCHAR, row_id BIGINT, matcher_version VARCHAR, kind VARCHAR, start_offset BIGINT,
+        end_offset BIGINT, line_delta INTEGER, PRIMARY KEY (dataset_id, row_id))''',
     '''CREATE TABLE IF NOT EXISTS errors (
         run_id VARCHAR, shard_id VARCHAR, seq INTEGER, file_id VARCHAR, level VARCHAR, message VARCHAR,
         PRIMARY KEY (run_id, shard_id, seq))''',
@@ -64,6 +70,7 @@ DDL = [
 MIGRATIONS = [
     'ALTER TABLE findings ADD COLUMN IF NOT EXISTS tier VARCHAR',
     'ALTER TABLE findings ADD COLUMN IF NOT EXISTS tags VARCHAR',
+    'ALTER TABLE matches ADD COLUMN IF NOT EXISTS encloses BOOLEAN',
 ]
 
 

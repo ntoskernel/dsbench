@@ -53,9 +53,9 @@ def test_match_run_pairs_labels_of_an_alias_with_the_scanned_copy(home: BenchHom
         con.execute("INSERT INTO runs (run_id, dataset_id, params) VALUES ('r1', 'd', '{}')")
         con.execute('''INSERT INTO findings (run_id, finding_id, file_id, start_line, value, confidence) VALUES
                ('r1', 1, 'copy-a', 2, 'Tq7XbR2mKp9L', 10), ('r1', 2, 'copy-a', 5, 'other', 10)''')
-        summary = matcher.match_run(con, home, 'r1')
+        summary = matcher.match_run(con, home, 'r1', ('legacy',))['legacy']
         assert summary['pairs'] == 2 and summary['rows_matched'] == 2 and summary['findings_matched'] == 1
-        assert matcher.match_run(con, home, 'r1')['pairs'] == 2  # again, replacing the earlier pairs
+        assert matcher.match_run(con, home, 'r1', ('legacy',))['legacy']['pairs'] == 2  # again, replacing them
         rows = con.execute(
             'SELECT matcher, matcher_version, finding_id, row_id FROM matches ORDER BY row_id'
         ).fetchall()
@@ -64,4 +64,4 @@ def test_match_run_pairs_labels_of_an_alias_with_the_scanned_copy(home: BenchHom
 
 def test_an_unknown_matcher_is_refused(home: BenchHome):
     with store.connect(home) as con, pytest.raises(matcher.MatcherError):
-        matcher.match_run(con, home, 'r1', matcher='balanced')
+        matcher.match_run(con, home, 'r1', matchers='balanced')

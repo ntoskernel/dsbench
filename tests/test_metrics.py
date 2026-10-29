@@ -67,7 +67,7 @@ def con(home: BenchHome):
         con.execute(
             "INSERT INTO shards (run_id, shard_id, n_files, status, cpu_s, wall_s) VALUES ('r', 's00001', 4, 'done', 7200, 60)"
         )
-        matcher.match_run(con, home, 'r')
+        matcher.match_run(con, home, 'r', ('legacy',))
         yield con
 
 

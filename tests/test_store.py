@@ -22,11 +22,14 @@ def test_connect_creates_every_table_and_is_idempotent(home: BenchHome):
         'artifacts',
         'findings',
         'matches',
+        'label_spans',
         'errors',
     }
     with store.connect(home) as con:
         assert 'matcher_version' in store.table_columns(con, 'matches')
         assert 'depth' in store.table_columns(con, 'artifacts')
+        assert {'tier', 'tags'} <= set(store.table_columns(con, 'findings'))
+        assert 'encloses' in store.table_columns(con, 'matches')
 
 
 def test_a_read_only_store_must_exist(tmp_path):

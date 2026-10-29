@@ -185,15 +185,17 @@ def _run(args, opts: RunOptions, home) -> int:
     return 0 if result['status'] == 'done' else 1
 
 
-def _analyze(con, home, run_id: str) -> None:
-    from dsbench.matcher import match_run
+def _analyze(con, home, run_id: str, matchers=None, processes: Optional[int] = None) -> None:
+    from dsbench.matcher import MATCHERS, match_run
     from dsbench.metrics import write_metrics
 
-    matched = match_run(con, home, run_id)
-    print(
-        f"[match] {matched['matcher']} ({matched['matcher_version']}): {matched['pairs']:,} pairs, "
-        f"{matched['rows_matched']:,} rows, {matched['findings_matched']:,} of {matched['findings']:,} findings"
-    )
+    for m in match_run(con, home, run_id, matchers or MATCHERS, processes).values():
+        kinds = m.get('label_kinds')
+        print(
+            f"[match] {m['matcher']} ({m['matcher_version']}): {m['pairs']:,} pairs, "
+            f"{m['rows_matched']:,} rows, {m['findings_matched']:,} of {m['findings']:,} findings"
+            + (f"; labels located {', '.join(f'{k} {n:,}' for k, n in kinds.items())}" if kinds else '')
+        )
     _print_metrics(write_metrics(con, home, run_id), home.run_dir(run_id))
 
 
@@ -223,7 +225,7 @@ def cmd_match(args) -> int:
 
     home = resolve_home(args.home)
     with connect(home) as con:
-        _analyze(con, home, args.run)
+        _analyze(con, home, args.run, None if args.matcher == 'all' else (args.matcher,), args.processes)
     return 0
 
 
@@ -396,6 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     match = sub.add_parser('match', help="pair a run's findings with the labels, then count")
     match.add_argument('--run', required=True)
+    match.add_argument(
+        '--matcher',
+        default='all',
+        choices=['all', 'located', 'legacy'],
+        help='which pairs to store again (default: all)',
+    )
+    match.add_argument('--processes', type=int, help='processes that read the corpus for `located` (default: up to 16)')
     match.set_defaults(func=cmd_match)
 
     metrics = sub.add_parser('metrics', help="count a run's stored pairs: metrics.json and summary.md")
