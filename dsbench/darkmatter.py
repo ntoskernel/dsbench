@@ -138,9 +138,22 @@ unclear           cannot be decided offline from this evidence
 
 Policies: framework secrets committed as a project's defaults (a Django SECRET_KEY, session secrets) and shipped
 product defaults are test_credential unless there is evidence of production use. Book and tutorial sample code is
-test_credential; a deployment of a real test or staging environment is live. Crypto test vectors and documented SDK
-sample passwords in files the dataset labels only N are not_secret and placeholder, following the dataset there. An
-AWS secret stays live even inside a desktop app: it is never public by design."""
+test_credential; a deployment of a real test or staging environment is live. An AWS secret stays live even inside a
+desktop app: it is never public by design.
+
+Placeholder or test_credential: a value that is visibly fake or trivial (words, repeated or sequential characters, a
+short value of low entropy) is placeholder wherever it is. A random-looking value that serves tests, examples or
+development is test_credential, with one exception that follows the dataset: an example in documentation or an API
+specification (a README, docs pages, OpenAPI or Swagger files, SDK samples) in a file whose labels are only N, or that
+has no labels, is placeholder however realistic it looks; in a file with a Y label it is test_credential. Crypto test
+vectors in files labelled only N are not_secret.
+
+Keys whose kind the format shows: an extended public key (formats: bip32_public) or a hex public key
+(ec_public_key_hex) is not_secret; an extended private key (bip32_private) is test_credential in tests and examples,
+and live otherwise.
+
+copy_of_labelled: rules settle the exact copies of labelled values before judging, and a sheet does not show labels
+elsewhere. Do not give it on a sheet."""
 
 # characters of the line shown on each side of a value
 CONTEXT = 200
@@ -284,6 +297,10 @@ def formats(value: str) -> Dict:
         'google_api_key': r'AIza[0-9A-Za-z_-]{35}',
         'uuid': r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
         'hex_digest': r'[0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}',
+        # the mask hides the prefix that tells a private extended key from a public one, and a public key from a secret
+        'bip32_private': r'[xyztuvYZUV]prv[1-9A-HJ-NP-Za-km-z]{107,108}',
+        'bip32_public': r'[xyztuvYZUV]pub[1-9A-HJ-NP-Za-km-z]{107,108}',
+        'ec_public_key_hex': r'0[23][0-9a-fA-F]{64}|04[0-9a-fA-F]{128}',
         'url_with_credentials': r'[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@\S+',
     }
     for name, pattern in checks.items():

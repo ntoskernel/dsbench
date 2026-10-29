@@ -122,6 +122,11 @@ def test_offline_format_checks():
     der = base64.b64encode(b'\x30\x82' + b'\x01' * 40).decode()
     assert darkmatter.formats(f'-----BEGIN RSA PRIVATE KEY-----\\n{der}\\n-----END RSA PRIVATE KEY-----')['pem']['der']
     assert darkmatter.formats('AKIAZ7XQ4M2LP8RT4WEN') == {'aws_key_id': True}
+    body = ('Tq7XbR2mKp9LZx9Qm2Lp8Rt4Mk3Vb8' * 4)[:107]
+    assert darkmatter.formats(f'xprv{body}') == {'bip32_private': True}
+    assert darkmatter.formats(f'tpub{body}') == {'bip32_public': True}
+    assert darkmatter.formats('02' + 'a7' * 32) == {'ec_public_key_hex': True}
+    assert darkmatter.formats('a7' * 32) == {'hex_digest': True}
 
 
 @pytest.mark.parametrize(
