@@ -137,9 +137,12 @@ def _files(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
            FROM artifacts a JOIN files f ON f.dataset_id = ? AND f.file_id = a.file_id WHERE a.run_id = ?''',
         [DEEP_MAX_SIZE] * 4 + [run['dataset_id'], run['run_id']],
     ).fetchone()
-    expected = con.execute(
-        'SELECT count(*) FROM files WHERE dataset_id = ? AND view_path IS NOT NULL', [run['dataset_id']]
-    ).fetchone()[0]
+    expected = (
+        con.execute('SELECT count(DISTINCT file_id) FROM shard_files WHERE run_id = ?', [run['run_id']]).fetchone()[0]
+        or con.execute(
+            'SELECT count(*) FROM files WHERE dataset_id = ? AND view_path IS NOT NULL', [run['dataset_id']]
+        ).fetchone()[0]
+    )
     return {
         'to_scan': expected,
         'artifacts': sum(statuses.values()),

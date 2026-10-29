@@ -187,3 +187,15 @@ def test_without_a_june_table_everything_else_is_still_counted(con, home: BenchH
     m = metrics.compute(con, 'r', legacy_dir=home.legacy_dir)
     assert m['june_table'] is False and m['june_way'] is None and m['per_repository_and_value'] is None
     assert m['findings'] and 'no June table in this bench home' in metrics.summary_markdown(m)
+
+
+def test_a_sample_run_counts_only_the_labels_of_its_files(con):
+    params = {'cores': 2, 'segments': [], 'sample': {'n': 1, 'seed': 11, 'files': 1}}
+    con.execute("UPDATE runs SET params = ? WHERE run_id = 'r'", [json.dumps(params)])
+    con.execute("INSERT INTO shard_files (run_id, shard_id, file_id) VALUES ('r', 's00001', 'f1')")
+    m = metrics.compute(con, 'r', rows=ROWS)
+    low = m['located']['per_group']['low']
+    # f1 holds row 1 (real, found) and rows 4 and 5 (look-alikes, row 4 charged)
+    assert (low['secrets'], low['secrets_found'], low['lookalikes'], low['lookalikes_found']) == (1, 1, 2, 1)
+    assert m['june_way'] is None and m['scope']['files'] == 1 and m['files']['to_scan'] == 1
+    assert 'Not applicable: a sample run' in metrics.summary_markdown(m)

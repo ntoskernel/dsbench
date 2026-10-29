@@ -20,7 +20,7 @@ from dsbench.legacy import june, pgcopy
 from dsbench.matcher import MatcherError
 from dsbench.metrics import MetricsError
 from dsbench.places import PlacesError, resolve_places
-from dsbench.runner import RunError, RunOptions
+from dsbench.runner import DEFAULT_SEED, RunError, RunOptions
 from dsbench.store import StoreError
 from dsbench.tool import DEFAULT_PROFILE, PROFILE_ALIASES, PROFILES, ToolError
 
@@ -160,7 +160,16 @@ def _run(args, opts: RunOptions, home) -> int:
                 cwd = places.tool_cwd or Path.cwd()
             tool = resolve_tool(cwd, args.tool_cmd, args.profile, args.tool_ref, python=python)
             check_module(tool)
-            runner = Runner.create(con, home, resolve_dataset(con, args.dataset), tool, opts, label=args.label)
+            runner = Runner.create(
+                con,
+                home,
+                resolve_dataset(con, args.dataset),
+                tool,
+                opts,
+                label=args.label,
+                sample=(args.sample, args.seed) if args.sample else None,
+                labelled_only=args.labelled_only,
+            )
         t = runner.tool
         print(
             f'[run] {runner.run_id}: DeepSecrets {t.version} at {t.commit} in {t.cwd}, profile {t.profile}, '
@@ -401,6 +410,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--solo-timeout', type=float, default=4 * 3600, help='seconds for one file (default: 14400)')
     run.add_argument('--attempts', type=int, default=2, help='tries for a single file before giving up (default: 2)')
     run.add_argument('--label', help='a free-text name for the build, kept in the run\'s params')
+    run.add_argument('--sample', type=int, metavar='N', help='scan N labelled files drawn with --seed')
+    run.add_argument(
+        '--seed', type=int, default=DEFAULT_SEED, help='the sample\'s seed (default: 11, the reference sample)'
+    )
+    run.add_argument('--labelled-only', action='store_true', help='leave out the files without a label')
     run.add_argument('--resume', metavar='RUN', help='continue an interrupted run with its own scanner')
     run.add_argument('--no-analyze', action='store_true', help='scan only; match and metrics later')
     run.set_defaults(func=cmd_run)

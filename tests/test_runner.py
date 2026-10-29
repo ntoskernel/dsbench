@@ -186,3 +186,31 @@ def test_tiers_of_findings_stored_without_them_are_filled_from_suffixes_and_repo
     tiers = dict(con.execute('SELECT rule_id, tier FROM findings WHERE rule_id IN (\'S1\', \'S2\')').fetchall())
     assert tiers == {'S1': 'high', 'S2': None}
     assert con.execute("SELECT count(*) FROM findings WHERE rule_id LIKE '%-HIGH' AND tier = 'high'").fetchone()[0] >= 1
+
+
+def test_the_sample_rule_is_a_seeded_draw_from_the_sorted_labelled_ids():
+    ids = [f'f{i:02d}' for i in range(40)]
+    assert runner.draw_sample(list(reversed(ids)), 5, 11) == runner.draw_sample(ids, 5, 11)
+    assert runner.draw_sample(ids, 5, 11) == __import__('random').Random(11).sample(ids, 5)
+    assert runner.draw_sample(ids, 5, 12) != runner.draw_sample(ids, 5, 11)
+    with pytest.raises(runner.RunError):
+        runner.draw_sample(ids, 41, 11)
+
+
+def test_a_sample_run_scans_and_resumes_only_its_files(bench, home: BenchHome, monkeypatch):
+    con, dataset_id, tool = bench()
+    files, described = runner.select_files(con, dataset_id, sample=(1, 3))
+    assert len(files) == 1 and described['n'] == 1 and described['seed'] == 3 and described['files'] == 1
+    assert runner.select_files(con, dataset_id, labelled_only=True)[0] and 'flat.txt' not in {
+        f['file_id'] for f in runner.select_files(con, dataset_id, labelled_only=True)[0]
+    }
+    r = runner.Runner.create(con, home, dataset_id, tool, fast(), sample=(2, 3))
+    assert r.total_files == 2 and store.get_run(con, r.run_id)['params']['sample']['rule'] == runner.SAMPLE_RULE
+    finish = runner.Runner._finish
+    monkeypatch.setattr(runner.Runner, '_finish', lambda self, *a: (_ for _ in ()).throw(KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        r.execute()
+    monkeypatch.setattr(runner.Runner, '_finish', finish)
+    resumed = runner.Runner.resume(con, home, r.run_id, fast())
+    assert resumed.total_files == 2 and resumed.execute()['status'] == 'done'
+    assert con.execute('SELECT count(*) FROM artifacts WHERE run_id = ?', [r.run_id]).fetchone()[0] == 2

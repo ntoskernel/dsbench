@@ -9,12 +9,20 @@ out or fails is split in two; a single file is tried again, then recorded with t
 
 A shard's directory is `runs/<run_id>/shards/sNNNNN/` with `target/` (symlinks at the view paths into the corpus),
 `report.sarif` and `scanner.log`. Its report is ingested in one transaction when it finishes, so a run interrupted at
-any point keeps every finished shard, and `--resume` scans only the files without an artifact, with the run's own
-scanner (refusing one whose source digest changed). `progress.json` in the run directory says how far a run is."""
+any point keeps every finished shard, and `--resume` scans only the run's files without an artifact, with the run's
+own scanner (refusing one whose source digest changed). `progress.json` in the run directory says how far a run is.
 
+A run scans every file of the dataset unless it is narrowed. `--labelled-only` leaves out the files without a label.
+`--sample N --seed S` scans N labelled files drawn as `random.Random(S).sample(sorted(labelled file ids), N)`: with
+N 3,000 and S 11 that is the sample DeepSecrets 2.2's changes were first measured on (1,405 MB, 809 real candidate
+groups on SecretBench). The run records the rule, the seed and a digest of the drawn ids, and metrics count only the
+labels of the files it scanned."""
+
+import hashlib
 import json
 import os
 import platform
+import random
 import shlex
 import shutil
 import signal
@@ -42,6 +50,8 @@ DEEP_WEIGHT = 8
 MIN_COST = 20_000
 SHARDS_PER_CORE = 12
 PROGRESS_EVERY_S = 10.0
+DEFAULT_SEED = 11
+SAMPLE_RULE = 'random.Random(seed).sample(sorted(labelled file ids), n)'
 
 
 class RunError(Exception):
@@ -142,6 +152,43 @@ class Tally:
     statuses: Dict[str, int] = field(default_factory=dict)
 
 
+def draw_sample(file_ids: List[str], n: int, seed: int) -> List[str]:
+    """The sample rule: N of the labelled file ids, sorted first so the draw depends only on the ids and the seed."""
+    ids = sorted(file_ids)
+    if not 0 < n <= len(ids):
+        raise RunError(f'a sample of {n} from {len(ids):,} labelled files')
+    return random.Random(seed).sample(ids, n)
+
+
+def select_files(
+    con: duckdb.DuckDBPyConnection,
+    dataset_id: str,
+    sample: Optional[Tuple[int, int]] = None,
+    labelled_only: bool = False,
+) -> Tuple[List[dict], Optional[Dict]]:
+    """The files a new run scans (each scanned copy once), and the sample's description for the run's params."""
+    files = fetch_dicts(
+        con, 'SELECT file_id, view_path, size, labelled, scan_file_id FROM files WHERE dataset_id = ?', [dataset_id]
+    )
+    scanned = {f['file_id']: f for f in files if f['view_path'] is not None}
+    if sample is None:
+        chosen = [f for f in scanned.values() if f['labelled'] or not labelled_only]
+        return [{k: f[k] for k in ('file_id', 'view_path', 'size')} for f in chosen], None
+    n, seed = sample
+    drawn = draw_sample([f['file_id'] for f in files if f['labelled']], n, seed)
+    scan_of = {f['file_id']: f['scan_file_id'] or f['file_id'] for f in files}
+    chosen = [scanned[i] for i in sorted({scan_of[d] for d in drawn}) if i in scanned]
+    described = {
+        'n': n,
+        'seed': seed,
+        'rule': SAMPLE_RULE,
+        'ids_sha256': hashlib.sha256('\n'.join(sorted(drawn)).encode('utf-8')).hexdigest(),
+        'files': len(chosen),
+        'bytes': sum(f['size'] for f in chosen),
+    }
+    return [{k: f[k] for k in ('file_id', 'view_path', 'size')} for f in chosen], described
+
+
 def new_run_id(profile: str, now: Optional[datetime] = None) -> str:
     return f"{(now or datetime.now()).strftime('%Y%m%d-%H%M%S')}-{profile}"
 
@@ -208,12 +255,17 @@ class Runner:
         opts: RunOptions,
         label: Optional[str] = None,
         run_id: Optional[str] = None,
+        sample: Optional[Tuple[int, int]] = None,
+        labelled_only: bool = False,
     ) -> 'Runner':
         run_id = run_id or new_run_id(tool.profile)
         if con.execute('SELECT 1 FROM runs WHERE run_id = ?', [run_id]).fetchone() or home.run_dir(run_id).exists():
             raise RunError(f'run {run_id} exists already')
+        files, described = select_files(con, dataset_id, sample, labelled_only)
         params = {
             **opts.params(),
+            'sample': described,
+            'labelled_only': labelled_only,
             'label': label,
             'tool_ref': tool.ref,
             'tool_venv': tool.venv,
@@ -240,11 +292,6 @@ class Runner:
         )
         home.run_dir(run_id).mkdir(parents=True)
         runner = cls(con, home, get_run(con, run_id), tool, opts)
-        files = fetch_dicts(
-            con,
-            'SELECT file_id, view_path, size FROM files WHERE dataset_id = ? AND view_path IS NOT NULL',
-            [dataset_id],
-        )
         runner.queue = runner._register(plan(files, opts.cores, opts.solo_bytes, opts.max_files))
         runner.total_files = len(files)
         return runner
@@ -276,17 +323,17 @@ class Runner:
         )
         con.commit()
         runner = cls(con, home, get_run(con, run_id), tool, opts)
+        # the run's own files: every file it planned when it was created
+        planned = 'SELECT DISTINCT file_id FROM shard_files WHERE run_id = ?'
         todo = fetch_dicts(
             con,
-            '''SELECT f.file_id, f.view_path, f.size FROM files f
-               WHERE f.dataset_id = ? AND f.view_path IS NOT NULL
+            f'''SELECT f.file_id, f.view_path, f.size FROM files f
+               WHERE f.dataset_id = ? AND f.file_id IN ({planned})
                  AND f.file_id NOT IN (SELECT file_id FROM artifacts WHERE run_id = ?)''',
-            [run['dataset_id'], run_id],
+            [run['dataset_id'], run_id, run_id],
         )
         runner.queue = runner._register(plan(todo, opts.cores, opts.solo_bytes, opts.max_files))
-        runner.total_files = con.execute(
-            'SELECT count(*) FROM files WHERE dataset_id = ? AND view_path IS NOT NULL', [run['dataset_id']]
-        ).fetchone()[0]
+        runner.total_files = con.execute(f'SELECT count(*) FROM ({planned})', [run_id]).fetchone()[0]
         runner.tally.files_done = runner.total_files - len(todo)
         return runner
 

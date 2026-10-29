@@ -61,6 +61,7 @@ dsbench run --cores 16                 # scan every file, then match and count
 dsbench watch                          # in another terminal: live progress and an ETA
 dsbench status                         # datasets and runs
 dsbench run --tool-ref v2.1.1          # a release's committed tree, in a venv from its own poetry.lock
+dsbench run --sample 3000 --seed 11    # the reference sample: 3,000 labelled files, 1.4 GB
 dsbench run --resume <run_id>          # continue an interrupted run with its own scanner
 dsbench match --run <run_id>           # pair findings with labels again (after a matcher change)
 dsbench metrics --run <run_id>         # count again: metrics.json and summary.md
@@ -85,6 +86,11 @@ fragment. SecretBench has 95,992 groups (14,610 real, 81,382 hard negatives) and
 once into the cache, and it runs in a venv built once from that ref's own `poetry.lock` (its `main` group, every
 package at its locked version and hash, installed by pip without resolving), since releases pin different
 dependencies. Refs with the same lock share the venv.
+
+A run scans every file unless it is narrowed. `--labelled-only` leaves out the files without a label. `--sample N
+--seed S` scans N labelled files drawn as `random.Random(S).sample(sorted(labelled file ids), N)`; with 3,000 and seed
+11 (the default seed) that is the sample DeepSecrets 2.2's changes were first measured on, 1,405 MB with 809 real
+candidate groups on SecretBench. A sample run counts only the labels of the files it scanned.
 
 `run` plans the files into shards, longest first: files over 5 MB alone, the rest packed to about equal cost. `--cores`
 scanner processes run at once, each scanning one shard with `--process-count 1` in its own process group, with
