@@ -13,6 +13,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import duckdb
 
 from dsbench import __version__
+from dsbench.compare import CompareError
+from dsbench.darkmatter import DarkMatterError
 from dsbench.dataset import DatasetError
 from dsbench.diagnose import DiagnoseError
 from dsbench.doctor import FAIL, run_doctor
@@ -286,6 +288,24 @@ def cmd_diagnose(args) -> int:
     return 0
 
 
+def cmd_compare(args) -> int:
+    from dsbench.compare import compare
+    from dsbench.store import connect
+
+    home = resolve_home(args.home)
+    with connect(home) as con:
+        c = compare(con, home, args.runs, name=args.name, samples=args.bootstrap, seed=args.seed)
+    print('per candidate group, then per (repository, value), at low:')
+    for r in c['runs']:
+        g, u = r['per_group']['low'], r['per_repository_and_value']['low']
+        print(
+            f"  {r['tool']:<22} recall {_percent(g['recall'])}, precision {_percent(g['precision'])} | "
+            f"recall {_percent(u['recall'])}, precision {_percent(u['precision'])}"
+        )
+    print(f"written: {c['written_to']}/compare.json, compare.md")
+    return 0
+
+
 def _progress_path(home, run_id: Optional[str]) -> Optional[Path]:
     """The run's progress.json, or else the most recently updated one of a running run, or else of any run."""
     if run_id:
@@ -473,6 +493,13 @@ def build_parser() -> argparse.ArgumentParser:
     diag.add_argument('--reuse-traces', action='store_true', help='analyse the stored traces again without tracing')
     diag.set_defaults(func=cmd_diagnose)
 
+    cmp = sub.add_parser('compare', help='runs of one dataset head to head: every level, the reliability table')
+    cmp.add_argument('runs', nargs='+', metavar='RUN', help='two runs or more; differences are taken from the first')
+    cmp.add_argument('--name', help='the comparison\'s name in comparisons/<date>-<name>/')
+    cmp.add_argument('--bootstrap', type=int, default=1000, help='repository-bootstrap samples (default: 1000)')
+    cmp.add_argument('--seed', type=int, default=1, help='the bootstrap seed (default: 1)')
+    cmp.set_defaults(func=cmd_compare)
+
     status = sub.add_parser('status', help='datasets and runs')
     status.set_defaults(func=cmd_status)
 
@@ -498,6 +525,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         MatcherError,
         MetricsError,
         DiagnoseError,
+        CompareError,
+        DarkMatterError,
     ) as e:
         print(f'dsbench: {e}', file=sys.stderr)
         return 1

@@ -67,6 +67,7 @@ dsbench match --run <run_id>           # pair findings with labels again (after 
 dsbench match --run <run_id> --matcher located --processes 16   # one matcher, its corpus reads in 16 processes
 dsbench metrics --run <run_id>         # count again: metrics.json and summary.md
 dsbench diagnose --run <run_id>        # why it missed and what it reported, from the scanner's own tracer
+dsbench compare RUN RUN ...            # builds or tools head to head, with bootstrap intervals
 ```
 
 A run id is `<YYYYMMDD>-<HHMMSS>-<profile>`; `--label` names the build under test in the run's parameters.
@@ -139,6 +140,18 @@ the numeric confidence is stored beside the tier.
 
 Every stored pair carries the matcher's version; `metrics` refuses pairs from another version, so a matcher change
 means `dsbench match` again, never a silent mix.
+
+## Comparing runs
+
+`compare RUN RUN ...` counts runs of one dataset side by side, each as `metrics` counts it: per candidate group, per
+(repository, value) and per row, at every named level, with the reliability of each tier. Each run's difference from
+the first comes with a 95% interval from a paired bootstrap over repositories, so one repository's copies of a secret
+move together. When the bench home holds a dark-matter overlay (`overlays/dark_matter_labels.csv`: one verdict per
+unit beyond the labels, keyed by the repository and the SHA-256 of the normalised value, so it holds no value), the
+per-(repository, value) view is also counted with it: units judged secrets in kind (live, test credentials, copies of
+labelled secrets) count as found, units judged not secrets (publishable, placeholders, not secrets) as false
+positives, and recall divides by the labelled secrets plus every judged secret any compared run reports. Comparisons
+are written to `comparisons/<date>-<name>/`, aggregates only.
 
 ## Diagnosis
 
