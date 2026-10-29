@@ -457,7 +457,9 @@ def cmd_status(args) -> int:
             kind = json.loads(params).get('tool_kind') or 'deepsecrets'
             name = {'deepsecrets': 'DeepSecrets', 'betterleaks': 'Betterleaks'}.get(kind, kind)
             print(
-                f"  {run_id}  {status:<11} {name} {version} at {commit}  {files:,} files, {findings:,} findings"
+                f"  {run_id}  {status:<11} {name} {version}"
+                + (f' at {commit}' if commit else '')
+                + f"  {files:,} files, {findings:,} findings"
                 + (f'  [{label}]' if label else '')
             )
     return 0
