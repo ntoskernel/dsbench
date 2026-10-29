@@ -24,7 +24,7 @@ How labels whose value sits away from their span are handled is a choice of this
 SecretBench's 97,479 rows, 96,163 are exact, 376 moved and 681 reformed on their own lines, 49 elsewhere, and 210 are
 in no form in the file: 163 fall back to their span and 47 are transcriptions. Nearly all of the 210 are private keys,
 and for about half of them the file holds a different key at that place. With the span fallback DeepSecrets 2.2.0
-scores 13,489 real groups against the published 13,483; without it about 13,440, too few. Leaving the transcribed keys
+scores 13,489 real groups against the published 13,483; without it 13,442, too few. Leaving the transcribed keys
 at `none` keeps 27 groups uncredited, the keys inside string literals whose labels carry escapes or quotes the finding
 lacks, which the published matcher did not credit either; crediting them is a later version of this matcher."""
 

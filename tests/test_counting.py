@@ -53,3 +53,13 @@ def test_pairs_outside_the_scope_are_ignored():
     c = counting.count(labels, PAIRS)
     # row 1 is out of scope: finding 10 now pairs only fragment row 2, which it encloses
     assert c['per_group']['low']['secrets'] == 2 and c['per_group']['very-high']['secrets_found'] == 0
+
+
+def test_numeric_cuts_count_pairs_by_their_confidence():
+    # the same pairs scored by confidence: 10 for the very-high finding, and so on
+    confidence = {VERY_HIGH: 9, HIGH: 7, MEDIUM: 4, LOW: 1}
+    pairs = [(f, row, enc, confidence[rank]) for f, row, enc, rank in PAIRS] + [(16, 8, False, None)]
+    c = counting.count(counting.Labels(ROWS), pairs, counting.CONFIDENCE_CUTS)
+    assert set(c) == {'per_group', 'per_repository_and_value', 'per_row'} and len(c['per_group']) == 11
+    group = {cut: (v['secrets_found'], v['lookalikes_found']) for cut, v in c['per_group'].items()}
+    assert group['0'] == group['1'] == (2, 3) and group['5'] == (1, 1) and group['10'] == (0, 0)

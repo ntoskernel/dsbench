@@ -88,7 +88,8 @@ def load_labels(con: duckdb.DuckDBPyConnection, dataset_id: str, scope: Optional
 
 
 def located_pairs(con: duckdb.DuckDBPyConnection, run_id: str, rank_sql: str) -> List[Tuple[int, int, bool, int]]:
-    """(finding_id, row_id, encloses, tier rank) of every `located` pair."""
+    """(finding_id, row_id, encloses, score) of every `located` pair; the score is the SQL expression given, the tier
+    rank or the confidence."""
     return con.execute(
         f'''SELECT m.finding_id, m.row_id, coalesce(m.encloses, false), {rank_sql}
             FROM matches m JOIN findings f ON f.run_id = m.run_id AND f.finding_id = m.finding_id
@@ -97,8 +98,17 @@ def located_pairs(con: duckdb.DuckDBPyConnection, run_id: str, rank_sql: str) ->
     ).fetchall()
 
 
-def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]]) -> Dict:
-    pairs = [p for p in pairs if p[1] in labels.real]
+LEVEL_CUTS = {level: TIER_RANK[level] for level in LEVELS}
+# 2.3's --min-confidence: every whole confidence from 0 to 10
+CONFIDENCE_CUTS = {str(c): c for c in range(11)}
+
+
+def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]], cuts: Optional[Dict[str, int]] = None) -> Dict:
+    """Each view at each cut: a pair counts at a cut when its score (the finding's tier rank, or its confidence)
+    reaches the cut. The reliability table needs tier ranks, so it comes only with the level cuts."""
+    by_tier = cuts is None
+    cuts = LEVEL_CUTS if cuts is None else cuts
+    pairs = [p for p in pairs if p[1] in labels.real and p[3] is not None]
     hits_real = {f for f, row, _, _ in pairs if labels.real[row]}
     # per row, the best rank at which it is found or charged
     found: Dict[int, int] = {}
@@ -133,9 +143,8 @@ def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]]) -> Dict:
     def at(best: Dict, rank: int) -> int:
         return sum(1 for r in best.values() if r >= rank)
 
-    views = {'per_group': {}, 'per_repository_and_value': {}, 'per_row': {}}
-    for level in LEVELS:
-        rank = TIER_RANK[level]
+    views: Dict = {'per_group': {}, 'per_repository_and_value': {}, 'per_row': {}}
+    for level, rank in cuts.items():
         views['per_group'][level] = scores(
             n_groups[True], at(group_found, rank), n_groups[False], at(group_charged, rank)
         )
@@ -143,6 +152,8 @@ def count(labels: Labels, pairs: List[Tuple[int, int, bool, int]]) -> Dict:
             n_units[True], at(unit_found, rank), n_units[False], at(unit_charged, rank)
         )
         views['per_row'][level] = scores(n_rows[True], at(found, rank), n_rows[False], at(charged, rank))
+    if not by_tier:
+        return views
     reliability = {}
     for tier in TIERS[1:]:
         rank = TIER_RANK[tier]

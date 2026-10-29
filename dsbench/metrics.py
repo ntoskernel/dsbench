@@ -226,11 +226,20 @@ def located_view(con: duckdb.DuckDBPyConnection, run: Dict, scope: Optional[set]
             [run['dataset_id']],
         ).fetchall()
     )
+    # a rejected candidate has no place in a numeric cut either: the scanner reports it only at `all`
+    confidence = "CASE WHEN f.tier IS DISTINCT FROM 'info' THEN coalesce(f.confidence, 0) END"
+    by_confidence = counting.count(
+        labels, counting.located_pairs(con, run['run_id'], confidence), counting.CONFIDENCE_CUTS
+    )
     return {
         'matcher': 'located',
         'version': MATCHER_VERSIONS['located'],
         'labels_located': kinds,
         **counting.count(labels, counting.located_pairs(con, run['run_id'], rank_sql('f.tier'))),
+        'by_min_confidence': {
+            'per_group': by_confidence['per_group'],
+            'per_repository_and_value': by_confidence['per_repository_and_value'],
+        },
         'extras': counting.extras(con, run, rank_sql('x.tier'), scope),
     }
 
@@ -367,6 +376,19 @@ def summary_markdown(m: Dict) -> str:
         '## Per labelled row (`located` matcher, every row)',
         '',
         *_scores_table(loc['per_row']),
+        '## By minimum confidence (2.3\'s `--min-confidence`; candidate groups, then (repository, value))',
+        '',
+        '| Confidence | Recall | Precision | F1 | Unit recall | Unit precision |',
+        '| ---: | ---: | ---: | ---: | ---: | ---: |',
+        *(
+            f"| {c} | {_pct(g['recall'])} | {_pct(g['precision'])} | {_pct(g['f1'])} "
+            f"| {_pct(u['recall'])} | {_pct(u['precision'])} |"
+            for (c, g), u in zip(
+                loc['by_min_confidence']['per_group'].items(),
+                loc['by_min_confidence']['per_repository_and_value'].values(),
+            )
+        ),
+        '',
         '## Reliability of each tier (candidate groups, at the best tier that found or charged them)',
         '',
         '| Tier | Real | Look-alikes | Share real |',
