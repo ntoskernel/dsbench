@@ -1,0 +1,324 @@
+"""`metrics`: a run counted the June way, at each confidence level, into `metrics.json` and `summary.md`.
+
+The June view (`legacy/june.py`) takes June's own labelled rows (no extras, no row with a manual `problem` flag: 14,847
+secrets and 82,265 look-alikes) and asks of each whether the run found it. Here a row is found at a level when one of
+the CSV rows it stands for is paired by the `legacy` matcher with a finding whose confidence reaches the level's floor.
+The floors are the scanner's `CONFIDENCE_LEVELS` (`deepsecrets/config.py:16` at 2.2.0: low 0, medium 3, high 6,
+very-high 9), so a cut of a `low` run gives the findings a scan at that level reports. Beside it, the same rows per
+(repository, value): one unit per repository, label and raw label value, found when any of its rows is, so copies of
+one value do not multiply. The value is not normalised: keyed raw, June's own rows give June's published 93.10%,
+while the `legacy` normalisation merges more and gives 92.61%. Precision in both is found secrets over found
+secrets plus charged look-alikes; unlabelled findings never enter it.
+
+`summary.md` and `metrics.json` hold aggregates only, never a value or a file name."""
+
+import json
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+import duckdb
+
+from dsbench.home import BenchHome
+from dsbench.legacy import june
+from dsbench.matcher import MATCHER_VERSIONS
+from dsbench.runner import DEEP_MAX_SIZE
+from dsbench.store import fetch_dicts, get_run
+
+LEVELS = {'low': 0, 'medium': 3, 'high': 6, 'very-high': 9}
+MATCHER = 'legacy'
+
+
+class MetricsError(Exception):
+    pass
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator else 0.0
+
+
+def row_confidence(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER) -> Dict[int, int]:
+    """Each matched CSV row and the highest confidence of a finding paired with it."""
+    versions = {
+        v
+        for (v,) in con.execute(
+            'SELECT DISTINCT matcher_version FROM matches WHERE run_id = ? AND matcher = ?', [run_id, matcher]
+        ).fetchall()
+    }
+    if versions - {MATCHER_VERSIONS[matcher]}:
+        raise MetricsError(
+            f'{run_id} has {matcher} pairs from {", ".join(sorted(versions))}, not {MATCHER_VERSIONS[matcher]}: '
+            f'run `dsbench match --run {run_id}`'
+        )
+    if not versions and con.execute('SELECT count(*) FROM findings WHERE run_id = ?', [run_id]).fetchone()[0]:
+        raise MetricsError(f'{run_id} has findings but no {matcher} pairs: run `dsbench match --run {run_id}`')
+    return dict(
+        con.execute(
+            '''SELECT m.row_id, max(coalesce(f.confidence, 0)) FROM matches m
+               JOIN findings f ON f.run_id = m.run_id AND f.finding_id = m.finding_id
+               WHERE m.run_id = ? AND m.matcher = ? GROUP BY m.row_id''',
+            [run_id, matcher],
+        ).fetchall()
+    )
+
+
+def found_at(best: Dict[int, int], floor: int) -> Callable[[june.JuneRow], bool]:
+    def found(row: june.JuneRow) -> bool:
+        return any(best.get(int(i), -1) >= floor for i in row.csv_ids)
+
+    return found
+
+
+def unit_view(
+    rows: List[june.JuneRow], label_of: Dict[int, Tuple[str, str]], found: Callable[[june.JuneRow], bool]
+) -> Dict[str, float]:
+    """The June rows per (repository, value): a unit is found when any of its clean rows is."""
+    units: Dict[Tuple[str, str, bool], bool] = {}
+    for row in rows:
+        if not row.clean or not row.csv_ids:
+            continue
+        repo, value = label_of[int(row.csv_ids[0])]
+        key = (repo, value, row.is_valid)
+        units[key] = units.get(key, False) or found(row)
+    n = Counter()
+    for (_, _, valid), hit in units.items():
+        n['secrets' if valid else 'lookalikes'] += 1
+        n['secrets_found' if valid else 'lookalikes_found'] += hit
+    recall = _ratio(n['secrets_found'], n['secrets'])
+    precision = _ratio(n['secrets_found'], n['secrets_found'] + n['lookalikes_found'])
+    return {
+        'secrets': n['secrets'],
+        'secrets_found': n['secrets_found'],
+        'lookalikes': n['lookalikes'],
+        'lookalikes_found': n['lookalikes_found'],
+        'recall': recall,
+        'precision': precision,
+        'f1': _ratio(2 * recall * precision, recall + precision),
+    }
+
+
+def _files(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
+    statuses = dict(
+        con.execute('SELECT status, count(*) FROM artifacts WHERE run_id = ? GROUP BY 1', [run['run_id']]).fetchall()
+    )
+    tier = con.execute(
+        '''SELECT count(*) FILTER (WHERE f.size > ?), count(*) FILTER (WHERE f.size > ? AND a.depth = 'shallow'),
+                  count(*) FILTER (WHERE f.size <= ?), count(*) FILTER (WHERE f.size <= ? AND a.depth = 'deep'),
+                  count(*) FILTER (WHERE a.depth IS NULL), sum(a.scan_time_ms), sum(a.errors)
+           FROM artifacts a JOIN files f ON f.dataset_id = ? AND f.file_id = a.file_id WHERE a.run_id = ?''',
+        [DEEP_MAX_SIZE] * 4 + [run['dataset_id'], run['run_id']],
+    ).fetchone()
+    expected = con.execute(
+        'SELECT count(*) FROM files WHERE dataset_id = ? AND view_path IS NOT NULL', [run['dataset_id']]
+    ).fetchone()[0]
+    return {
+        'to_scan': expected,
+        'artifacts': sum(statuses.values()),
+        'status': dict(sorted(statuses.items())),
+        'depth': {
+            'tier_bytes': DEEP_MAX_SIZE,
+            'over_tier': tier[0],
+            'over_tier_shallow': tier[1],
+            'within_tier': tier[2],
+            'within_tier_deep': tier[3],
+            'no_depth': tier[4],
+        },
+        'scan_time_s': round((tier[5] or 0) / 1000, 1),
+        'error_notifications': int(tier[6] or 0),
+    }
+
+
+def _findings(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
+    by_level = {}
+    for level, floor in LEVELS.items():
+        by_level[level] = con.execute(
+            'SELECT count(*) FROM findings WHERE run_id = ? AND coalesce(confidence, 0) >= ?', [run['run_id'], floor]
+        ).fetchone()[0]
+    labelled = con.execute(
+        '''SELECT f.labelled, count(*) FROM findings x JOIN files f ON f.dataset_id = ? AND f.file_id = x.file_id
+           WHERE x.run_id = ? GROUP BY 1''',
+        [run['dataset_id'], run['run_id']],
+    ).fetchall()
+    rules = con.execute(
+        'SELECT rule_base, count(*) FROM findings WHERE run_id = ? GROUP BY 1 ORDER BY 2 DESC, 1',
+        [run['run_id']],
+    ).fetchall()
+    return {
+        'by_level': by_level,
+        'in_labelled_files': dict(labelled).get(True, 0),
+        'in_unlabelled_files': dict(labelled).get(False, 0),
+        'by_rule': dict(rules),
+    }
+
+
+def _operations(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
+    shards = con.execute(
+        '''SELECT count(*), count(*) FILTER (WHERE status = 'done'), count(*) FILTER (WHERE status = 'split'),
+                  count(*) FILTER (WHERE status = 'failed'), count(*) FILTER (WHERE status = 'done' AND n_files = 1),
+                  sum(cpu_s), max(max_rss_mb), max(wall_s) FILTER (WHERE status = 'done')
+           FROM shards WHERE run_id = ?''',
+        [run['run_id']],
+    ).fetchone()
+    params = run['params']
+    wall_s = sum(s.get('wall_s', 0) for s in params.get('segments', []))
+    return {
+        'cores': params.get('cores'),
+        'shards': {'total': shards[0], 'done': shards[1], 'split': shards[2], 'failed': shards[3], 'solo': shards[4]},
+        'wall_s': round(wall_s, 1),
+        'cpu_s': round(shards[5] or 0, 1),
+        'cpu_h': round((shards[5] or 0) / 3600, 2),
+        'max_rss_mb': round(shards[6] or 0, 1),
+        'longest_shard_s': round(shards[7] or 0, 1),
+        'segments': len(params.get('segments', [])),
+    }
+
+
+def compute(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    rows: Optional[List[june.JuneRow]] = None,
+    legacy_dir: Optional[Path] = None,
+) -> Dict:
+    run = get_run(con, run_id)
+    june_table = True
+    if rows is None:
+        try:
+            rows = june.load_rows(legacy_dir=legacy_dir)
+        except FileNotFoundError:
+            # no `preserve` export in this bench home: everything but the June view is still counted
+            rows, june_table = [], False
+    best = row_confidence(con, run_id)
+    label_of = {
+        r['row_id']: (r['repo'], r['value'])
+        for r in fetch_dicts(con, 'SELECT row_id, repo, value FROM labels WHERE dataset_id = ?', [run['dataset_id']])
+    }
+    ids = [int(i) for row in rows for i in row.csv_ids]
+    missing = sum(i not in label_of for i in ids)
+    june_way: Optional[Dict] = {}
+    per_unit: Optional[Dict] = {}
+    if missing or not june_table:
+        # no June table, or not June's corpus: the June view would count a different set of rows
+        june_way = per_unit = None
+    else:
+        for level, floor in LEVELS.items():
+            found = found_at(best, floor)
+            june_way[level] = june.view(rows, found=found)
+            per_unit[level] = unit_view(rows, label_of, found)
+    dataset = con.execute('SELECT stats FROM datasets WHERE dataset_id = ?', [run['dataset_id']]).fetchone()
+    pairs = con.execute(
+        'SELECT count(*), count(DISTINCT row_id) FROM matches WHERE run_id = ? AND matcher = ?', [run_id, MATCHER]
+    ).fetchone()
+    return {
+        'computed_at': datetime.now().isoformat(timespec='seconds'),
+        'run': {
+            'run_id': run_id,
+            'dataset_id': run['dataset_id'],
+            'status': run['status'],
+            'profile': run['profile'],
+            'label': run['params'].get('label'),
+            'tool': {
+                'cwd': run['tool_cwd'],
+                'ref': run['params'].get('tool_ref'),
+                'version': run['tool_version'],
+                'commit': run['tool_commit'],
+                'digest': run['tool_digest'],
+            },
+            'started_at': str(run['started_at']),
+            'finished_at': str(run['finished_at']),
+        },
+        'dataset': json.loads(dataset[0]) if dataset else None,
+        'files': _files(con, run),
+        'findings': _findings(con, run),
+        'matching': {'matcher': MATCHER, 'version': MATCHER_VERSIONS[MATCHER], 'pairs': pairs[0], 'rows': pairs[1]},
+        'levels': LEVELS,
+        'june_table': june_table,
+        'june_rows_missing': missing,
+        'june_way': june_way,
+        'per_repository_and_value': per_unit,
+        'operations': _operations(con, run),
+    }
+
+
+def _pct(value: float) -> str:
+    return f'{value:.2%}'
+
+
+def summary_markdown(m: Dict) -> str:
+    run, files, ops = m['run'], m['files'], m['operations']
+    tool = run['tool']
+    lines = [
+        f"# {run['run_id']}",
+        '',
+        f"- Scanner: DeepSecrets {tool['version']} at {tool['commit'] or 'unknown commit'}"
+        + (f" (ref `{tool['ref']}`)" if tool['ref'] else '')
+        + f", source digest `{(tool['digest'] or '')[:12]}`",
+        f"- Profile: `{run['profile']}`" + (f"; label: {run['label']}" if run['label'] else ''),
+        f"- Dataset: `{run['dataset_id']}`; run status `{run['status']}`",
+        f"- Matcher: `{m['matching']['matcher']}` version `{m['matching']['version']}`",
+        '',
+        '## Files',
+        '',
+        f"{files['artifacts']:,} of {files['to_scan']:,} files have an artifact: "
+        + ', '.join(f'{n:,} `{s}`' for s, n in files['status'].items())
+        + '.',
+        f"Size tier ({files['depth']['tier_bytes']:,} bytes): {files['depth']['over_tier_shallow']:,} of "
+        f"{files['depth']['over_tier']:,} larger files `shallow`, {files['depth']['within_tier_deep']:,} of "
+        f"{files['depth']['within_tier']:,} others `deep`. Error notifications: {files['error_notifications']:,}.",
+        '',
+        '## The June way (per labelled row, `legacy` matcher)',
+        '',
+    ]
+    if m['june_way'] is None:
+        if not m.get('june_table', True):
+            why = 'no June table in this bench home (`dsbench preserve --from-dump DUMP` writes it).'
+        else:
+            why = f"{m['june_rows_missing']:,} CSV ids of June's rows are not labels of this dataset."
+        lines += [f'Not applicable: {why}', '']
+        return '\n'.join(lines + _operations_lines(ops))
+    lines += [
+        '| Level | Recall | Precision | F1 | FPR | Secrets found | Look-alikes charged | Findings |',
+        '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    ]
+    for level, v in m['june_way'].items():
+        lines.append(
+            f"| {level} | {_pct(v['recall'])} | {_pct(v['precision'])} | {_pct(v['f1'])} | {_pct(v['fpr'])} "
+            f"| {v['secrets_found']:,} of {v['secrets']:,} | {v['lookalikes_found']:,} of {v['lookalikes']:,} "
+            f"| {m['findings']['by_level'][level]:,} |"
+        )
+    lines += [
+        '',
+        '## Per repository and value (the same rows)',
+        '',
+        '| Level | Recall | Precision | F1 | Secrets found | Look-alikes charged |',
+        '| --- | ---: | ---: | ---: | ---: | ---: |',
+    ]
+    for level, v in m['per_repository_and_value'].items():
+        lines.append(
+            f"| {level} | {_pct(v['recall'])} | {_pct(v['precision'])} | {_pct(v['f1'])} "
+            f"| {v['secrets_found']:,} of {v['secrets']:,} | {v['lookalikes_found']:,} of {v['lookalikes']:,} |"
+        )
+    return '\n'.join(lines + [''] + _operations_lines(ops))
+
+
+def _operations_lines(ops: Dict) -> List[str]:
+    shards = ops['shards']
+    return [
+        '## Operations',
+        '',
+        f"{shards['total']:,} shards ({shards['done']:,} done, {shards['solo']:,} of them single-file, "
+        f"{shards['split']:,} split, {shards['failed']:,} failed) at `--cores {ops['cores']}`; "
+        f"wall {ops['wall_s'] / 60:,.1f} min over {ops['segments']} segment(s), scanner CPU {ops['cpu_h']:,.2f} h, "
+        f"largest process {ops['max_rss_mb']:,.0f} MB, longest shard {ops['longest_shard_s'] / 60:,.1f} min. "
+        'CPU is comparable only between runs on one machine with the same `--cores` and a quiet host.',
+        '',
+    ]
+
+
+def write_metrics(con: duckdb.DuckDBPyConnection, home: BenchHome, run_id: str) -> Dict:
+    m = compute(con, run_id, legacy_dir=home.legacy_dir)
+    run_dir = home.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / 'metrics.json').write_text(json.dumps(m, indent=2) + '\n')
+    (run_dir / 'summary.md').write_text(summary_markdown(m))
+    return m

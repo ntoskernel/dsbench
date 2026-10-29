@@ -1,0 +1,419 @@
+"""dsbench's command line. The store is opened only by the commands that need it, and `status` falls back to a
+run's `progress.json` while a run holds the store's write lock."""
+
+import argparse
+import json
+import signal
+import sys
+import time
+from collections import deque
+from pathlib import Path
+from typing import Deque, Dict, List, Optional, Tuple
+
+import duckdb
+
+from dsbench import __version__
+from dsbench.dataset import DatasetError
+from dsbench.doctor import FAIL, run_doctor
+from dsbench.home import HomeError, resolve_home
+from dsbench.legacy import june, pgcopy
+from dsbench.matcher import MatcherError
+from dsbench.metrics import MetricsError
+from dsbench.places import PlacesError, resolve_places
+from dsbench.runner import RunError, RunOptions
+from dsbench.store import StoreError
+from dsbench.tool import DEFAULT_PROFILE, PROFILE_ALIASES, PROFILES, ToolError
+
+# `watch` measures its rate over the progress it saw in this window
+WATCH_WINDOW_S = 180
+
+
+def _percent(value: float) -> str:
+    return f'{value:.2%}'
+
+
+def cmd_doctor(args) -> int:
+    places = resolve_places(data=args.data, home=args.home, tool_cwd=args.tool_cwd, cache=args.cache)
+    checks = run_doctor(places)
+    width = max(len(c.name) for c in checks)
+    for c in checks:
+        print(f'{c.status:<5} {c.name:<{width}}  {c.detail}')
+    failed = sum(c.status == FAIL for c in checks)
+    print(f'\n{"not ready" if failed else "ready"}: {failed} failed')
+    return 1 if failed else 0
+
+
+def cmd_preserve(args) -> int:
+    from dsbench.legacy.preserve import preserve
+
+    pg_restore = args.pg_restore or pgcopy.find_pg_restore()
+    if not pg_restore:
+        print(
+            f'preserve: no pg_restore of version {pgcopy.MIN_MAJOR}+ (the PGDG postgresql-client-18)', file=sys.stderr
+        )
+        return 1
+    places = resolve_places(data=args.data)
+    csv_path = Path(args.csv) if args.csv else (places.data / 'secretbench.csv' if places.data else None)
+    if csv_path is None or not csv_path.is_file():
+        print('preserve: no labels CSV; pass --csv or set DSBENCH_DATA', file=sys.stderr)
+        return 1
+    result = preserve(resolve_home(args.home), Path(args.from_dump), csv_path, pg_restore)
+    rows, view = result['rows'], result['june_view']
+    print(f"exported {result['tables']} into {result['legacy_dir']}")
+    print(
+        f"June rows: {rows['labelled_rows']:,} labelled, {rows['extra_rows']:,} extras, {rows['unmapped_june_rows']} unmapped"
+    )
+    print(f"CSV rows absent from June: {rows['csv_rows_absent']}")
+    print(
+        f"June view: recall {_percent(view['recall'])} ({view['secrets_found']:,}/{view['secrets']:,}), "
+        f"FPR {_percent(view['fpr'])}, precision {_percent(view['precision'])}, "
+        f"all-rows recall {_percent(view['recall_all_rows'])}"
+    )
+    return 0
+
+
+def cmd_june(args) -> int:
+    if args.table:
+        rows = june.load_rows(Path(args.table))
+    else:
+        rows = june.load_rows(legacy_dir=resolve_home(args.home).legacy_dir)
+    v = june.view(rows)
+    print(f'{len(rows):,} June rows; {v["secrets"]:,} clean secrets, {v["lookalikes"]:,} look-alikes')
+    print(f'recall    {_percent(v["recall"])}  ({v["secrets_found"]:,} found)')
+    print(f'precision {_percent(v["precision"])}  ({v["lookalikes_found"]:,} look-alikes charged)')
+    print(f'FPR       {_percent(v["fpr"])}')
+    print(f'F1        {_percent(v["f1"])}')
+    print(f'recall over all {v["all_secrets"]:,} secrets {_percent(v["recall_all_rows"])}')
+    return 0
+
+
+def cmd_prepare(args) -> int:
+    from dsbench.dataset import prepare
+    from dsbench.store import connect
+
+    places = resolve_places(data=args.data)
+    csv_path = Path(args.csv) if args.csv else (places.data / 'secretbench.csv' if places.data else None)
+    files_dir = Path(args.files) if args.files else (places.data / 'Files' if places.data else None)
+    if csv_path is None or not csv_path.is_file() or files_dir is None or not files_dir.is_dir():
+        print('prepare: pass --csv and --files, or set DSBENCH_DATA', file=sys.stderr)
+        return 1
+    home = resolve_home(args.home)
+    with connect(home) as con:
+        dataset_id, stats = prepare(con, home, csv_path, files_dir, force=args.force)
+    state = 'already prepared' if stats.get('already_prepared') else 'prepared'
+    print(f'{dataset_id} {state}')
+    print(
+        f"rows      {stats['rows']:,} ({stats['rows_y']:,} Y, {stats['rows_n']:,} N) in {stats['repositories']:,} repositories"
+    )
+    print(
+        f"files     {stats['files']:,} ({stats['files_labelled']:,} labelled, {stats['files_unlabelled']:,} not), "
+        f"{stats['bytes'] / 1e9:,.3f} GB; {stats['files_scanned']:,} to scan"
+    )
+    print(
+        f"aliases   {stats['aliases']}, view paths moved {stats['views_suffixed']}, labelled files missing {stats['labelled_files_missing']}"
+    )
+    print('issues    ' + (', '.join(f'{k} {v:,}' for k, v in stats['issues'].items()) or 'none'))
+    return 0
+
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def cmd_run(args) -> int:
+    opts = RunOptions(
+        cores=args.cores, shard_timeout=args.shard_timeout, solo_timeout=args.solo_timeout, attempts=args.attempts
+    )
+    home = resolve_home(args.home)
+    previous = signal.signal(signal.SIGTERM, _interrupt)
+    try:
+        return _run(args, opts, home)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _run(args, opts: RunOptions, home) -> int:
+    from dsbench.runner import Runner
+    from dsbench.store import connect, resolve_dataset
+    from dsbench.tool import check_module, extract_ref, resolve_tool
+
+    with connect(home) as con:
+        if args.resume:
+            runner = Runner.resume(con, home, args.resume, opts)
+        else:
+            places = resolve_places(tool_cwd=args.tool_cwd, cache=args.cache)
+            if args.tool_ref:
+                if places.cache is None or places.tool_cwd is None:
+                    print('run: --tool-ref needs the repository (--tool-cwd) and the cache (--cache)', file=sys.stderr)
+                    return 1
+                cwd = extract_ref(places.tool_cwd, args.tool_ref, places.cache)
+            else:
+                cwd = places.tool_cwd or Path.cwd()
+            tool = resolve_tool(cwd, args.tool_cmd, args.profile, args.tool_ref)
+            check_module(tool)
+            runner = Runner.create(con, home, resolve_dataset(con, args.dataset), tool, opts, label=args.label)
+        t = runner.tool
+        print(
+            f'[run] {runner.run_id}: DeepSecrets {t.version} at {t.commit} in {t.cwd}, profile {t.profile}, '
+            f'{len(runner.queue):,} shards for {runner.total_files - runner.tally.files_done:,} files, '
+            f'--cores {opts.cores}',
+            flush=True,
+        )
+        try:
+            result = runner.execute()
+        except KeyboardInterrupt:
+            print(f'[run] interrupted; continue with `dsbench run --resume {runner.run_id}`', file=sys.stderr)
+            return 130
+        print(
+            f"[run] {result['status']}: {result['files_done']:,} files, {result['findings']:,} findings, "
+            f"{result['done']:,} shards done, {result['split']} split, {result['failed']} failed, "
+            f"scanner CPU {result['cpu_s'] / 3600:,.2f} h",
+            flush=True,
+        )
+        if args.no_analyze:
+            return 0 if result['status'] == 'done' else 1
+        _analyze(con, home, runner.run_id)
+    return 0 if result['status'] == 'done' else 1
+
+
+def _analyze(con, home, run_id: str) -> None:
+    from dsbench.matcher import match_run
+    from dsbench.metrics import write_metrics
+
+    matched = match_run(con, home, run_id)
+    print(
+        f"[match] {matched['matcher']} ({matched['matcher_version']}): {matched['pairs']:,} pairs, "
+        f"{matched['rows_matched']:,} rows, {matched['findings_matched']:,} of {matched['findings']:,} findings"
+    )
+    _print_metrics(write_metrics(con, home, run_id), home.run_dir(run_id))
+
+
+def _print_metrics(m: dict, run_dir: Path) -> None:
+    files = m['files']
+    print(
+        f"files: {files['artifacts']:,} of {files['to_scan']:,}; "
+        + ', '.join(f'{s} {n:,}' for s, n in files['status'].items())
+    )
+    if m['june_way'] is None:
+        print(f"June view: not applicable, {m['june_rows_missing']:,} CSV ids of June's rows are not labels here")
+        print(f'written: {run_dir / "metrics.json"}, {run_dir / "summary.md"}')
+        return
+    print('June way, then per (repository, value):')
+    for level in m['june_way']:
+        v, u = m['june_way'][level], m['per_repository_and_value'][level]
+        print(
+            f"  {level:<9} recall {_percent(v['recall'])} ({v['secrets_found']:,}), precision {_percent(v['precision'])} "
+            f"({v['lookalikes_found']:,} charged), F1 {_percent(v['f1'])} | "
+            f"recall {_percent(u['recall'])}, precision {_percent(u['precision'])}"
+        )
+    print(f'written: {run_dir / "metrics.json"}, {run_dir / "summary.md"}')
+
+
+def cmd_match(args) -> int:
+    from dsbench.store import connect
+
+    home = resolve_home(args.home)
+    with connect(home) as con:
+        _analyze(con, home, args.run)
+    return 0
+
+
+def cmd_metrics(args) -> int:
+    from dsbench.metrics import write_metrics
+    from dsbench.store import connect
+
+    home = resolve_home(args.home)
+    with connect(home) as con:
+        _print_metrics(write_metrics(con, home, args.run), home.run_dir(args.run))
+    return 0
+
+
+def _progress_path(home, run_id: Optional[str]) -> Optional[Path]:
+    """The run's progress.json, or else the most recently updated one of a running run, or else of any run."""
+    if run_id:
+        path = home.run_dir(run_id) / 'progress.json'
+        return path if path.is_file() else None
+    found = sorted(home.runs_dir.glob('*/progress.json'), key=lambda p: p.stat().st_mtime, reverse=True)
+    running = [p for p in found if json.loads(p.read_text()).get('status') == 'running']
+    return (running or found or [None])[0]
+
+
+def watch_lines(p: Dict, samples: Deque[Tuple[float, int, int]]) -> List[str]:
+    """The view of one progress.json; `samples` are (monotonic time, files done, shards done) seen so far. The ETA
+    counts shards, which the planner gives roughly equal cost, not files, which come largest first."""
+    files, shards = p['files'], p['shards']
+    share = files['done'] / files['total'] if files['total'] else 0.0
+    total_shards = shards['done'] + shards['running'] + shards['queued']
+    lines = [
+        f"dsbench run {p['run_id']}  {p['status']}  (--cores {p.get('cores', '?')}, updated {p['updated_at'][11:]})",
+        f"files     [{'#' * round(share * 40):<40}] {share:6.1%}  {files['done']:,} of {files['total']:,}",
+        f"shards    {shards['done']:,} of {total_shards:,} done, {shards['running']} running, {shards['queued']:,} queued"
+        f" | {shards['failed']} failed, {shards['split']} split, {shards['retried']} retried",
+        f"findings  {p['findings']:,}   cpu {p['cpu_s'] / 3600:.2f} h   elapsed {p['elapsed_s'] / 60:.1f} min"
+        '   (since this session started)',
+        'statuses  ' + (', '.join(f'{s} {n:,}' for s, n in p.get('statuses', {}).items()) or '-'),
+    ]
+    first, last = samples[0], samples[-1]
+    span = last[0] - first[0]
+    if p['status'] != 'running':
+        lines.append(f"stopped: {p['status']}")
+    elif span < 20 or last[2] == first[2]:
+        lines.append('rate      measuring...')
+    else:
+        shard_rate = (last[2] - first[2]) / span
+        eta = (shards['running'] / 2 + shards['queued']) / shard_rate
+        lines.append(
+            f"rate      {(last[1] - first[1]) / span:,.0f} files/s, {shard_rate * 60:,.1f} shards/min"
+            f" over the last {span / 60:.1f} min   ETA ~{eta / 60:,.0f} min"
+        )
+    return lines
+
+
+def cmd_watch(args) -> int:
+    home = resolve_home(args.home)
+    path = _progress_path(home, args.run)
+    if path is None:
+        print('watch: no run with a progress.json', file=sys.stderr)
+        return 1
+    samples: Deque[Tuple[float, int, int]] = deque()
+    clear = sys.stdout.isatty() and not args.once
+    try:
+        while True:
+            p = json.loads(path.read_text())
+            now = time.monotonic()
+            samples.append((now, p['files']['done'], p['shards']['done']))
+            while now - samples[0][0] > WATCH_WINDOW_S:
+                samples.popleft()
+            print(('\033[H\033[2J' if clear else '') + '\n'.join(watch_lines(p, samples)), flush=True)
+            if args.once or p['status'] != 'running':
+                return 0
+            time.sleep(args.every)
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_status(args) -> int:
+    from dsbench.store import connect
+
+    home = resolve_home(args.home)
+    try:
+        con = connect(home, read_only=True)
+    except duckdb.IOException:
+        print('the store is locked by a running dsbench; progress of the runs:')
+        for progress in sorted(home.runs_dir.glob('*/progress.json')):
+            p = json.loads(progress.read_text())
+            if p['status'] == 'running':
+                print(
+                    f"  {p['run_id']}: {p['files']['done']:,} of {p['files']['total']:,} files, "
+                    f"{p['shards']['running']} shards running, {p['shards']['queued']:,} queued, "
+                    f"{p['findings']:,} findings, {p['elapsed_s'] / 60:,.1f} min, updated {p['updated_at']}"
+                )
+        return 0
+    with con:
+        print('datasets:')
+        for dataset_id, created, stats in con.execute(
+            'SELECT dataset_id, created_at, stats FROM datasets ORDER BY created_at'
+        ).fetchall():
+            s = json.loads(stats)
+            print(f"  {dataset_id}  {created:%Y-%m-%d %H:%M}  {s['rows']:,} rows, {s['files']:,} files")
+        print('runs:')
+        for run_id, status, version, commit, params, files, findings in con.execute(
+            '''SELECT r.run_id, r.status, r.tool_version, r.tool_commit, r.params,
+                      (SELECT count(*) FROM artifacts a WHERE a.run_id = r.run_id),
+                      (SELECT count(*) FROM findings f WHERE f.run_id = r.run_id)
+               FROM runs r ORDER BY r.started_at'''
+        ).fetchall():
+            label = json.loads(params).get('label')
+            print(
+                f"  {run_id}  {status:<11} DeepSecrets {version} at {commit}  {files:,} files, {findings:,} findings"
+                + (f'  [{label}]' if label else '')
+            )
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog='dsbench', description='Benchmark DeepSecrets as a black box.')
+    parser.add_argument('--version', action='version', version=f'dsbench {__version__}')
+    parser.add_argument('--home', help='bench home (default: $DSBENCH_HOME)')
+    parser.add_argument('--data', help='datasets directory (default: $DSBENCH_DATA)')
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    doctor = sub.add_parser('doctor', help='check the places, the data, the tool and the legacy table')
+    doctor.add_argument('--tool-cwd', help='the scanner checkout (default: $DSBENCH_TOOL_CWD)')
+    doctor.add_argument('--cache', help='venvs and release trees (default: $DSBENCH_CACHE)')
+    doctor.set_defaults(func=cmd_doctor)
+
+    preserve = sub.add_parser('preserve', help="export the June 2026 Postgres dump into the bench home")
+    preserve.add_argument('--from-dump', required=True, help='the pg_dump custom-format archive')
+    preserve.add_argument('--csv', help='the labels (default: $DSBENCH_DATA/secretbench.csv)')
+    preserve.add_argument('--pg-restore', help='pg_restore 17 or later (default: found automatically)')
+    preserve.set_defaults(func=cmd_preserve)
+
+    june_cmd = sub.add_parser('june', help="June's own figures, from the bench home's values-free June table")
+    june_cmd.add_argument('--table', help="a june_rows.csv.gz (default: the bench home's latest export)")
+    june_cmd.set_defaults(func=cmd_june)
+
+    prepare_cmd = sub.add_parser('prepare', help='load the labels and the corpus listing into the store')
+    prepare_cmd.add_argument('--csv', help='the labels (default: $DSBENCH_DATA/secretbench.csv)')
+    prepare_cmd.add_argument('--files', help='the corpus directory (default: $DSBENCH_DATA/Files)')
+    prepare_cmd.add_argument('--force', action='store_true', help='rebuild a dataset prepared before')
+    prepare_cmd.set_defaults(func=cmd_prepare)
+
+    run = sub.add_parser('run', help='scan a dataset with the scanner under test, then match and count')
+    run.add_argument('--dataset', default='latest', help='a dataset id (default: the latest prepared)')
+    run.add_argument(
+        '--tool-cwd', help='the scanner checkout, or the repository of --tool-ref (default: $DSBENCH_TOOL_CWD)'
+    )
+    run.add_argument('--tool-cmd', help='the scanner command (default: python -W ignore -m deepsecrets)')
+    run.add_argument('--tool-ref', help="scan a ref's committed tree, extracted into $DSBENCH_CACHE/trees/")
+    run.add_argument('--cache', help='venvs and release trees (default: $DSBENCH_CACHE)')
+    run.add_argument(
+        '--profile',
+        default=DEFAULT_PROFILE,
+        choices=[*PROFILES, *PROFILE_ALIASES],
+        help='all-files (default; the only profile whose numbers are quoted) or scanner-defaults',
+    )
+    run.add_argument('--cores', type=int, default=16, help='scanner processes at once (default: 16)')
+    run.add_argument('--shard-timeout', type=float, default=3600, help='seconds for a packed shard (default: 3600)')
+    run.add_argument('--solo-timeout', type=float, default=4 * 3600, help='seconds for one file (default: 14400)')
+    run.add_argument('--attempts', type=int, default=2, help='tries for a single file before giving up (default: 2)')
+    run.add_argument('--label', help='a free-text name for the build, kept in the run\'s params')
+    run.add_argument('--resume', metavar='RUN', help='continue an interrupted run with its own scanner')
+    run.add_argument('--no-analyze', action='store_true', help='scan only; match and metrics later')
+    run.set_defaults(func=cmd_run)
+
+    match = sub.add_parser('match', help="pair a run's findings with the labels, then count")
+    match.add_argument('--run', required=True)
+    match.set_defaults(func=cmd_match)
+
+    metrics = sub.add_parser('metrics', help="count a run's stored pairs: metrics.json and summary.md")
+    metrics.add_argument('--run', required=True)
+    metrics.set_defaults(func=cmd_metrics)
+
+    status = sub.add_parser('status', help='datasets and runs')
+    status.set_defaults(func=cmd_status)
+
+    watch = sub.add_parser('watch', help="a live view of a run's progress, until it stops")
+    watch.add_argument('--run', help='a run id (default: the running run, else the latest)')
+    watch.add_argument('--every', type=float, default=5.0, help='seconds between redraws (default: 5)')
+    watch.add_argument('--once', action='store_true', help='print the view once and exit')
+    watch.set_defaults(func=cmd_watch)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except (
+        HomeError,
+        PlacesError,
+        StoreError,
+        DatasetError,
+        ToolError,
+        RunError,
+        MatcherError,
+        MetricsError,
+    ) as e:
+        print(f'dsbench: {e}', file=sys.stderr)
+        return 1

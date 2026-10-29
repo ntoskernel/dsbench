@@ -1,0 +1,152 @@
+import csv
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from dsbench import matcher, metrics, store
+from dsbench.home import BenchHome
+from dsbench.legacy import june
+from dsbench.legacy.june import JuneRow
+
+# (row_id, repo, file, line, value, label); rows 1 and 2 are one value in two files of one repository
+LABELS = [
+    (1, 'repo-a', 'f1', 1, 'Tq7XbR2mKp9L', True),
+    (2, 'repo-a', 'f2', 1, 'Tq7XbR2mKp9L', True),
+    (3, 'repo-b', 'f3', 1, 'Zx9Qm2Lp8Rt4', True),
+    (4, 'repo-a', 'f1', 2, 'hello', False),
+    (5, 'repo-a', 'f1', 3, 'world', False),
+    (6, 'repo-b', 'f3', 4, 'Mk3Vb8Qw1Zr5', True),
+    (7, 'repo-b', 'f3', 2, 'Zx9Qm2Lp8Rt4', False),
+]
+# (file, line, value, confidence)
+FINDINGS = [
+    ('f1', 1, 'Tq7XbR2mKp9L', 10),
+    ('f3', 1, 'Zx9Qm2Lp8Rt4', 4),
+    ('f1', 2, 'hello', 2),
+    ('f3', 2, 'Zx9Qm2Lp8Rt4', 7),
+    ('f9', 1, 'unlabelled', 10),
+]
+ROWS = [
+    JuneRow(row_id, (str(row_id),), file, line, label, 'not_a_secret' if row_id == 6 else None, False, None)
+    for row_id, _, file, line, _, label in LABELS
+]
+
+
+@pytest.fixture
+def con(home: BenchHome):
+    with store.connect(home) as con:
+        con.execute("INSERT INTO datasets (dataset_id, stats, created_at) VALUES ('d', '{\"rows\": 7}', now())")
+        for file_id in ('f1', 'f2', 'f3', 'f9'):
+            con.execute(
+                'INSERT INTO files (dataset_id, file_id, size, view_path, labelled, scan_file_id) VALUES (?, ?, ?, ?, ?, ?)',
+                ['d', file_id, 300_000 if file_id == 'f9' else 10, f'v/{file_id}', file_id != 'f9', file_id],
+            )
+        for row_id, repo, file_id, line, value, label in LABELS:
+            con.execute(
+                'INSERT INTO labels (dataset_id, row_id, repo, file_id, start_line, value, label) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ['d', row_id, repo, file_id, line, value, label],
+            )
+        params = {'cores': 2, 'segments': [{'wall_s': 90.0}], 'label': None}
+        con.execute(
+            "INSERT INTO runs (run_id, dataset_id, profile, params, status) VALUES ('r', 'd', 'all-files', ?, 'done')",
+            [json.dumps(params)],
+        )
+        for i, (file_id, line, value, confidence) in enumerate(FINDINGS, 1):
+            con.execute(
+                'INSERT INTO findings (run_id, finding_id, file_id, start_line, value, confidence, rule_base) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ['r', i, file_id, line, value, confidence, 'S105'],
+            )
+        for file_id in ('f1', 'f2', 'f3', 'f9'):
+            con.execute(
+                "INSERT INTO artifacts (run_id, file_id, status, depth, errors) VALUES ('r', ?, 'ok', ?, 0)",
+                [file_id, 'shallow' if file_id == 'f9' else 'deep'],
+            )
+        con.execute(
+            "INSERT INTO shards (run_id, shard_id, n_files, status, cpu_s, wall_s) VALUES ('r', 's00001', 4, 'done', 7200, 60)"
+        )
+        matcher.match_run(con, home, 'r')
+        yield con
+
+
+def test_the_june_way_at_each_level(con):
+    m = metrics.compute(con, 'r', rows=ROWS)
+    counts = {
+        level: (v['secrets'], v['secrets_found'], v['lookalikes'], v['lookalikes_found'])
+        for level, v in m['june_way'].items()
+    }
+    assert counts == {'low': (3, 2, 3, 2), 'medium': (3, 2, 3, 1), 'high': (3, 1, 3, 1), 'very-high': (3, 1, 3, 0)}
+    assert m['june_way']['medium']['precision'] == pytest.approx(2 / 3)
+    assert m['june_way']['low']['all_secrets'] == 4  # the flagged row counts only over all rows
+    assert m['findings']['by_level'] == {'low': 5, 'medium': 4, 'high': 3, 'very-high': 2}
+    assert (m['findings']['in_labelled_files'], m['findings']['in_unlabelled_files']) == (4, 1)
+
+
+def test_per_repository_and_value_a_copy_counts_once(con):
+    m = metrics.compute(con, 'r', rows=ROWS)
+    low = m['per_repository_and_value']['low']
+    # rows 1 and 2 are one unit, found through row 1; the same value labelled N elsewhere is a unit of its own
+    assert (low['secrets'], low['secrets_found'], low['lookalikes'], low['lookalikes_found']) == (2, 2, 3, 2)
+    assert low['recall'] == 1.0 and low['precision'] == 0.5
+    assert m['per_repository_and_value']['very-high']['secrets_found'] == 1
+
+
+def test_files_and_operations(con):
+    m = metrics.compute(con, 'r', rows=ROWS)
+    assert m['files']['status'] == {'ok': 4} and m['files']['to_scan'] == 4
+    assert m['files']['depth']['over_tier'] == m['files']['depth']['over_tier_shallow'] == 1
+    assert m['files']['depth']['within_tier'] == m['files']['depth']['within_tier_deep'] == 3
+    assert m['operations']['cpu_h'] == 2.0 and m['operations']['wall_s'] == 90.0
+    assert m['matching'] == {'matcher': 'legacy', 'version': 'legacy-1', 'pairs': 4, 'rows': 4}
+
+
+def test_pairs_from_another_matcher_version_are_refused(con):
+    con.execute("UPDATE matches SET matcher_version = 'legacy-0'")
+    with pytest.raises(metrics.MetricsError):
+        metrics.compute(con, 'r', rows=ROWS)
+    con.execute('DELETE FROM matches')
+    with pytest.raises(metrics.MetricsError):
+        metrics.compute(con, 'r', rows=ROWS)
+
+
+def test_another_corpus_gets_no_june_view(con):
+    other = [JuneRow(1, ('999',), 'x', 1, True, None, False, None)]
+    m = metrics.compute(con, 'r', rows=other)
+    assert m['june_way'] is None and m['june_rows_missing'] == 1
+    assert 'Not applicable' in metrics.summary_markdown(m)
+
+
+def test_the_written_reports_hold_aggregates_only(con, home: BenchHome, monkeypatch):
+    monkeypatch.setattr(metrics.june, 'load_rows', lambda **kwargs: ROWS)
+    m = metrics.write_metrics(con, home, 'r')
+    written = (home.run_dir('r') / 'metrics.json').read_text() + (home.run_dir('r') / 'summary.md').read_text()
+    for _, _, _, _, value, _ in LABELS:
+        assert value not in written
+    assert json.loads((home.run_dir('r') / 'metrics.json').read_text())['june_way'] == m['june_way']
+    summary = (home.run_dir('r') / 'summary.md').read_text()
+    assert '| low | 66.67% | 50.00% |' in summary and '## Per repository and value' in summary
+
+
+SECRETBENCH_CSV = Path(os.environ.get('DSBENCH_DATA', '/nonexistent')) / 'secretbench.csv'
+JUNE_TABLE = june.latest_table(Path(os.environ.get('DSBENCH_HOME', '/nonexistent')) / 'legacy')
+
+
+@pytest.mark.skipif(
+    not SECRETBENCH_CSV.is_file() or JUNE_TABLE is None, reason='needs SecretBench and the June table (DSBENCH_*)'
+)
+def test_the_unit_view_gives_junes_own_published_figure():
+    """The per-(repository, value) view keys the raw label value: on June's own rows that gives June's published
+    93.10%, which any normalisation of the value lowers. Values are read into memory only."""
+    csv.field_size_limit(sys.maxsize)
+    with open(SECRETBENCH_CSV, newline='', encoding='utf-8') as f:
+        label_of = {int(r['id']): (r['repo_name'], r['secret'][1:-1]) for r in csv.DictReader(f)}
+    v = metrics.unit_view(june.load_rows(JUNE_TABLE), label_of, found=lambda row: row.is_ds_found)
+    assert round(v['recall'], 4) == 0.9310
+
+
+def test_without_a_june_table_everything_else_is_still_counted(con, home: BenchHome):
+    m = metrics.compute(con, 'r', legacy_dir=home.legacy_dir)
+    assert m['june_table'] is False and m['june_way'] is None and m['per_repository_and_value'] is None
+    assert m['findings'] and 'no June table in this bench home' in metrics.summary_markdown(m)

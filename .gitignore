@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+
+# Bench data never belongs here: labels, raw findings and exports are real secrets, and live in the bench home
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.sarif
+# the June table points at real secrets by file and line: it lives in the bench home only
+june_rows*.csv.gz

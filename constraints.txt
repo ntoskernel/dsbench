@@ -1,0 +1,14 @@
+# Exact versions for dsbench, its dev tools and everything they pull in; post-create.sh installs under these
+black==26.5.1
+click==8.5.0
+duckdb==1.5.6
+iniconfig==2.3.1
+mypy-extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+platformdirs==4.13.7
+pluggy==1.7.0
+pygments==2.21.0
+pytest==9.1.1
+pytokens==0.4.1
+rapidfuzz==3.14.6

@@ -1,0 +1,58 @@
+[project]
+name = "dsbench"
+version = "0.1.0"
+description = "Black-box benchmark harness for the DeepSecrets secrets scanner on labelled corpora such as SecretBench"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Nikolai Khechumov", email = "khechumov@gmail.com" },
+]
+requires-python = ">=3.11"
+keywords = ["secrets", "secret-scanning", "benchmark", "sarif", "deepsecrets", "secretbench"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "duckdb>=1.5,<2",
+    "rapidfuzz>=3.14,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1",
+    "black==26.5.1",
+]
+
+[project.urls]
+repository = "https://github.com/ntoskernel/dsbench"
+"DeepSecrets" = "https://github.com/ntoskernel/deepsecrets"
+
+[project.scripts]
+dsbench = "dsbench.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dsbench*"]
+
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
