@@ -112,6 +112,10 @@ def cmd_prepare(args) -> int:
     print(
         f"aliases   {stats['aliases']}, view paths moved {stats['views_suffixed']}, labelled files missing {stats['labelled_files_missing']}"
     )
+    print(
+        f"groups    {stats['groups']:,} ({stats['groups_real']:,} real, {stats['groups_hard_negative']:,} hard negatives); "
+        f"{stats['fragment_rows']:,} fragment rows"
+    )
     print('issues    ' + (', '.join(f'{k} {v:,}' for k, v in stats['issues'].items()) or 'none'))
     return 0
 

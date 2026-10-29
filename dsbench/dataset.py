@@ -12,12 +12,23 @@ once (`scan_file_id` points at the copy that is scanned, and its labels keep the
 the second under `r_<hash>~2/`. A view path that is also a directory of another view path is moved the same way.
 
 The dataset id is `secretbench-<12 hex>` of a digest of the CSV's bytes and the corpus listing (names and sizes), so
-preparing the same data twice finds the existing dataset."""
+preparing the same data twice finds the existing dataset.
+
+Rows are also grouped into candidate groups (label policy 2), the unit the headline counts. SecretBench's regexes
+often labelled one literal several times: a token and its parts, or one value under two rows. Within one scanned file,
+two rows that start on the same line belong to one group when their spans overlap or their values, normalised the
+`legacy` way, are equal or one holds the other (a value that normalises to nothing relates by span only). A group with a
+Y row is one real secret; a group of N rows is one hard negative. On SecretBench that gives 95,992 groups: 14,610 real
+and 81,382 hard negatives. An N row is a fragment of a real secret when its comment says so ("Part of Slack Token": `Part
+of`, one word, `Token`) or its value lies inside the value of a Y row of its group: 1,149 rows. A fragment is charged
+only by a finding that is the fragment itself, not by one that reports the whole secret around it. A group's id is its
+smallest row id, so it is stable across preparations; a dataset prepared under an older label policy is rebuilt."""
 
 import csv
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -32,6 +43,9 @@ from dsbench.store import bulk_insert
 
 ADAPTER = 'secretbench'
 UNLABELLED_DIR = 'unlabelled'
+LABEL_POLICY_VERSION = 2
+# a labeller's note that a row is a piece of a secret token, not a value of its own
+FRAGMENT_COMMENT = re.compile(r'part of \w+ token', re.IGNORECASE)
 REQUIRED = [
     'id',
     'secret',
@@ -206,6 +220,69 @@ def tag_issues(rows: List[dict], sizes: Dict[str, int]) -> Counter:
     return tally
 
 
+def _spans_overlap(a: dict, b: dict) -> bool:
+    return (a['start_line'], a['start_col']) < (b['end_line'], b['end_col']) and (b['start_line'], b['start_col']) < (
+        a['end_line'],
+        a['end_col'],
+    )
+
+
+def related(a: dict, b: dict) -> bool:
+    """Whether two rows of one scanned file label one candidate."""
+    if a['start_line'] != b['start_line']:
+        return False
+    if _spans_overlap(a, b):
+        return True
+    x, y = legacy_norm(a['value']), legacy_norm(b['value'])
+    return bool(x) and bool(y) and (x in y or y in x)
+
+
+def is_fragment(row: dict, group: List[dict]) -> bool:
+    if row['label']:
+        return False
+    if FRAGMENT_COMMENT.fullmatch((row.get('comment') or '').strip()):
+        return True
+    value = row['value']
+    return bool(value) and any(o['label'] and value != o['value'] and value in o['value'] for o in group)
+
+
+def assign_groups(rows: List[dict], files: Dict[str, dict]) -> Dict[str, int]:
+    """Sets `group_id` and `fragment` on every row; rows of a file stored under two identifiers group together."""
+    parent = {row['row_id']: row['row_id'] for row in rows}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    by_line: Dict[Tuple[str, int], List[dict]] = defaultdict(list)
+    for row in rows:
+        meta = files.get(row['file_id'])
+        by_line[(meta['scan_file_id'] if meta else row['file_id'], row['start_line'])].append(row)
+    for line_rows in by_line.values():
+        for i, a in enumerate(line_rows):
+            for b in line_rows[i + 1 :]:
+                if related(a, b):
+                    ra, rb = find(a['row_id']), find(b['row_id'])
+                    if ra != rb:
+                        parent[max(ra, rb)] = min(ra, rb)
+    groups: Dict[int, List[dict]] = defaultdict(list)
+    for row in rows:
+        row['group_id'] = find(row['row_id'])
+        groups[row['group_id']].append(row)
+    for members in groups.values():
+        for row in members:
+            row['fragment'] = is_fragment(row, members)
+    real = sum(any(r['label'] for r in members) for members in groups.values())
+    return {
+        'groups': len(groups),
+        'groups_real': real,
+        'groups_hard_negative': len(groups) - real,
+        'fragment_rows': sum(row['fragment'] for row in rows),
+    }
+
+
 def prepare(
     con: duckdb.DuckDBPyConnection, home: BenchHome, csv_path: Path, files_dir: Path, force: bool = False
 ) -> Tuple[str, Dict]:
@@ -215,7 +292,7 @@ def prepare(
     fp = fingerprint(csv_path, sizes)
     dataset_id = f'secretbench-{fp[:12]}'
     existing = con.execute('SELECT stats FROM datasets WHERE dataset_id = ?', [dataset_id]).fetchone()
-    if existing and not force:
+    if existing and not force and json.loads(existing[0]).get('label_policy') == LABEL_POLICY_VERSION:
         return dataset_id, {**json.loads(existing[0]), 'already_prepared': True}
 
     rows = read_rows(csv_path)
@@ -224,7 +301,9 @@ def prepare(
         raise DatasetError(f'{sum(n > 1 for n in ids.values())} row ids repeat in {csv_path}')
     files, view_counts = assign_views(sizes, rows)
     issues = tag_issues(rows, sizes)
+    groups = assign_groups(rows, files)
     stats = {
+        'label_policy': LABEL_POLICY_VERSION,
         'rows': len(rows),
         'rows_y': sum(r['label'] for r in rows),
         'rows_n': sum(not r['label'] for r in rows),
@@ -237,6 +316,7 @@ def prepare(
         'labelled_files_missing': len({r['file_id'] for r in rows} - set(sizes)),
         'aliases': view_counts.get('aliases', 0),
         'views_suffixed': view_counts.get('views_suffixed', 0),
+        **groups,
         'issues': dict(sorted(issues.items())),
     }
 

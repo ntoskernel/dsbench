@@ -74,6 +74,13 @@ A run id is `<YYYYMMDD>-<HHMMSS>-<profile>`; `--label` names the build under tes
 labelled file at its original repository path under a neutral directory (`r_<hash>/<path>`), because path-aware
 scoring reads the path; unlabelled files stay flat.
 
+`prepare` also groups the rows into candidate groups. A corpus labelled by regexes often labels one literal several
+times, a token and its parts or one value under two rows, so rows of one file that start on the same line form one
+group when their spans overlap or their normalised values are equal or one holds the other. A group with a real-secret
+row is one real secret; a group of look-alike rows is one hard negative. A look-alike row that is a piece of a real
+secret, by its comment ("Part of Slack Token") or because its value lies inside a real row's value in its group, is a
+fragment. SecretBench has 95,992 groups (14,610 real, 81,382 hard negatives) and 1,149 fragment rows.
+
 `run` plans the files into shards, longest first: files over 5 MB alone, the rest packed to about equal cost. `--cores`
 scanner processes run at once, each scanning one shard with `--process-count 1` in its own process group, with
 `--report-diagnostics --disable-masking --outformat sarif`. A shard that fails or times out is split; a single file is

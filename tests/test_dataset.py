@@ -90,6 +90,64 @@ def test_aliases_and_colliding_views():
     assert counts == {'aliases': 1, 'views_suffixed': 2}
 
 
+def row(row_id, value, line=1, start=1, label=False, comment=None, file_id='f'):
+    return {
+        'row_id': row_id,
+        'file_id': file_id,
+        'value': value,
+        'start_line': line,
+        'end_line': line,
+        'start_col': start,
+        'end_col': start + len(value),
+        'label': label,
+        'comment': comment,
+    }
+
+
+def test_candidate_groups_join_rows_of_one_line_by_span_or_value():
+    rows = [
+        row(1, 'xoxb-1234-Tq7XbR2mKp9L', start=10, label=True),
+        row(2, '1234', start=15),  # inside row 1's span
+        row(3, 'Tq7XbR2mKp9L', start=40),  # elsewhere on the line, but its value is inside row 1's
+        row(4, 'Zx9Qm2Lp8Rt4', start=60),  # unrelated on the same line
+        row(5, 'Tq7XbR2mKp9L', line=2, label=True),  # the same value on another line: a group of its own
+        row(6, '--..--', start=80),  # normalises to nothing: relates by span only
+        row(7, '..', start=82),
+        row(8, 'Zx9Q-m2Lp8Rt4', start=90),  # equal to row 4 once normalised
+    ]
+    files = {'f': {'scan_file_id': 'f'}}
+    stats = dataset.assign_groups(rows, files)
+    groups = {r['row_id']: r['group_id'] for r in rows}
+    assert groups[1] == groups[2] == groups[3] == 1
+    assert groups[4] == groups[8] == 4 and groups[5] == 5 and groups[6] == groups[7] == 6
+    assert stats == {'groups': 4, 'groups_real': 2, 'groups_hard_negative': 2, 'fragment_rows': 2}
+    assert [r['row_id'] for r in rows if r['fragment']] == [2, 3]
+
+
+def test_fragments_by_comment_and_groups_across_aliases():
+    rows = [
+        row(1, 'Tq7XbR2mKp9L', comment=' Part of Slack Token '),
+        row(2, 'Zx9Qm2Lp8Rt4', line=2, comment='Part of URL'),
+        row(3, 'Mk3Vb8Qw1Zr5', line=3, comment='Part of Slack Token', label=True),  # a Y row is never a fragment
+        row(4, 'Tq7XbR2mKp9L', file_id='copy'),  # a second identifier of the same file
+    ]
+    stats = dataset.assign_groups(rows, {'f': {'scan_file_id': 'f'}, 'copy': {'scan_file_id': 'f'}})
+    assert [r['fragment'] for r in rows] == [True, False, False, False]
+    assert rows[3]['group_id'] == 1 and stats['groups'] == 3
+
+
+def test_a_dataset_of_an_older_label_policy_is_rebuilt(tmp_path: Path, home: BenchHome):
+    data = corpus(tmp_path)
+    dataset_id, stats, _, labels = prepared(home, data)
+    assert stats['label_policy'] == dataset.LABEL_POLICY_VERSION and stats['groups'] == 4
+    assert labels[2]['group_id'] == labels[3]['group_id'] == 2 and labels[4]['group_id'] == labels[5]['group_id'] == 4
+    with store.connect(home) as con:
+        con.execute("UPDATE datasets SET stats = json_object('rows', 6)")
+        con.execute('UPDATE labels SET group_id = NULL')
+    again, stats, _, labels = prepared(home, data)
+    assert again == dataset_id and 'already_prepared' not in stats and labels[3]['group_id'] == 2
+
+
 def test_a_csv_without_the_needed_columns_is_refused(tmp_path: Path):
     path = tmp_path / 'bad.csv'
     path.write_text('id,secret\n1,[x]\n')
