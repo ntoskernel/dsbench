@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -111,3 +112,91 @@ def test_the_default_command_runs_the_package_from_the_tool_directory(repo: Path
     assert tool.check_module(tool.resolve_tool(repo, cmd='other')) is None
     with pytest.raises(tool.ToolError):
         tool.resolve_tool(repo / 'deepsecrets')
+
+
+LOCK = '''
+[[package]]
+name = "pygments"
+version = "2.21.0"
+groups = ["main"]
+files = [
+    {file = "pygments-2.21.0-py3-none-any.whl", hash = "sha256:aa"},
+    {file = "pygments-2.21.0.tar.gz", hash = "sha256:bb"},
+]
+
+[[package]]
+name = "typing-extensions"
+version = "4.15.0"
+groups = ["main", "dev"]
+markers = {main = "python_version < \\"3.12\\"", dev = "python_version == \\"3.10\\""}
+files = [{file = "typing_extensions-4.15.0-py3-none-any.whl", hash = "sha256:cc"}]
+
+[[package]]
+name = "black"
+version = "26.5.1"
+groups = ["dev"]
+files = []
+
+[metadata]
+lock-version = "2.1"
+'''
+
+
+def test_the_main_group_of_a_lock_becomes_pinned_hashed_requirements():
+    assert tool.lock_requirements(LOCK) == [
+        'pygments==2.21.0 --hash=sha256:aa --hash=sha256:bb',
+        'typing-extensions==4.15.0 ; python_version < "3.12" --hash=sha256:cc',
+    ]
+    assert tool.lock_requirements(LOCK, group='dev')[1] == 'black==26.5.1'
+    old_format = '[[package]]\nname = "x"\nversion = "1"\ncategory = "main"\n\n[[package]]\nname = "y"\nversion = "2"\ncategory = "dev"\n'
+    assert tool.lock_requirements(old_format) == ['x==1']
+    with pytest.raises(tool.ToolError):
+        tool.lock_requirements('[[package]]\nname = "x"\nversion = "1"\ngroups = ["main"]\nsource = {type = "git"}\n')
+
+
+def test_a_refs_venv_is_built_once_per_lock(tmp_path: Path):
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'poetry.lock').write_text('[metadata]\nlock-version = "2.1"\n')  # no main packages: nothing to install
+    cache = tmp_path / 'cache'
+    python = tool.ensure_venv(tree, cache, sys.executable)
+    marker = Path(python).parents[1] / tool.VENV_MARKER
+    assert Path(python).is_file() and json.loads(marker.read_text())['packages'] == []
+    stamp = marker.stat().st_mtime_ns
+    assert tool.ensure_venv(tree, cache, sys.executable) == python and marker.stat().st_mtime_ns == stamp
+    (tree / 'poetry.lock').write_text('[metadata]\nlock-version = "2.1"\ncontent-hash = "other"\n')
+    assert tool.ensure_venv(tree, cache, sys.executable) != python
+    (tree / 'poetry.lock').unlink()
+    with pytest.raises(tool.ToolError):
+        tool.ensure_venv(tree, cache, sys.executable)
+
+
+def test_a_run_of_a_ref_scans_its_tree_in_its_own_venv(repo: Path, tmp_path: Path, capsys):
+    from dsbench.cli import main
+    from helpers import FAKE_SCANNER, csv_row, write_corpus
+
+    (repo / 'deepsecrets' / '__main__.py').write_text(
+        f'import runpy\nrunpy.run_path({str(FAKE_SCANNER)!r}, run_name="__main__")\n'
+    )
+    (repo / 'poetry.lock').write_text('[metadata]\nlock-version = "2.1"\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-q', '-m', 'runnable')
+    git(repo, 'tag', 'v9.2.0')
+    data = write_corpus(
+        tmp_path / 'data',
+        {'acme-app_c0_src__a.py': 'token = "Tq7XbR2mKp9L"\n'},
+        [csv_row(1, 'Tq7XbR2mKp9L', 'acme-app_c0_src__a.py', 1, 'Y')],
+    )
+    places = ['--home', str(tmp_path / 'home'), '--data', str(data)]
+    assert main([*places, 'prepare']) == 0
+    run = ['run', '--tool-ref', 'v9.2.0', '--tool-cwd', str(repo), '--cache', str(tmp_path / 'cache'), '--cores', '1']
+    assert main([*places, *run]) == 0
+    out = capsys.readouterr().out
+    assert '[run] done: 1 files, 1 findings' in out
+    from dsbench import store
+    from dsbench.home import BenchHome
+
+    with store.connect(BenchHome(tmp_path / 'home')) as con:
+        cmd, params = con.execute('SELECT tool_cmd, params FROM runs').fetchone()
+    venv = json.loads(params)['tool_venv']
+    assert json.loads(cmd)[0] == f'{venv}/bin/python' and venv.startswith(str(tmp_path / 'cache' / 'venvs'))

@@ -46,7 +46,7 @@ python -m venv .venv
 | `DSBENCH_DATA` | The datasets: `secretbench.csv` and `Files/`. Read only |
 | `DSBENCH_HOME` | The bench home: the store (`bench.duckdb`), run directories, exports. Holds real secrets |
 | `DSBENCH_TOOL_CWD` | The DeepSecrets checkout under test |
-| `DSBENCH_CACHE` | Release trees extracted for `--tool-ref` |
+| `DSBENCH_CACHE` | Release trees extracted for `--tool-ref`, and a venv per lock to run them in |
 | `DSBENCH_TOOL_PYTHON` | The scanner's interpreter. Default: `python3` on `PATH` outside dsbench's own venv |
 
 `--data`, `--home` and the commands' `--tool-cwd` and `--cache` override them. `dsbench doctor` checks that each is
@@ -60,7 +60,7 @@ dsbench prepare                        # load the labels and the corpus listing 
 dsbench run --cores 16                 # scan every file, then match and count
 dsbench watch                          # in another terminal: live progress and an ETA
 dsbench status                         # datasets and runs
-dsbench run --tool-ref v2.2.0          # a release's committed tree instead of the working tree
+dsbench run --tool-ref v2.1.1          # a release's committed tree, in a venv from its own poetry.lock
 dsbench run --resume <run_id>          # continue an interrupted run with its own scanner
 dsbench match --run <run_id>           # pair findings with labels again (after a matcher change)
 dsbench metrics --run <run_id>         # count again: metrics.json and summary.md
@@ -80,6 +80,11 @@ group when their spans overlap or their normalised values are equal or one holds
 row is one real secret; a group of look-alike rows is one hard negative. A look-alike row that is a piece of a real
 secret, by its comment ("Part of Slack Token") or because its value lies inside a real row's value in its group, is a
 fragment. SecretBench has 95,992 groups (14,610 real, 81,382 hard negatives) and 1,149 fragment rows.
+
+`run --tool-ref REF` scans the committed tree of a release or commit instead of a checkout: `git archive` extracts it
+once into the cache, and it runs in a venv built once from that ref's own `poetry.lock` (its `main` group, every
+package at its locked version and hash, installed by pip without resolving), since releases pin different
+dependencies. Refs with the same lock share the venv.
 
 `run` plans the files into shards, longest first: files over 5 MB alone, the rest packed to about equal cost. `--cores`
 scanner processes run at once, each scanning one shard with `--process-count 1` in its own process group, with

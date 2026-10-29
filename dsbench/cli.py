@@ -139,21 +139,26 @@ def cmd_run(args) -> int:
 def _run(args, opts: RunOptions, home) -> int:
     from dsbench.runner import Runner
     from dsbench.store import connect, resolve_dataset
-    from dsbench.tool import check_module, extract_ref, resolve_tool
+    from dsbench.places import tool_python
+    from dsbench.tool import check_module, ensure_venv, extract_ref, resolve_tool
 
     with connect(home) as con:
         if args.resume:
             runner = Runner.resume(con, home, args.resume, opts)
         else:
             places = resolve_places(tool_cwd=args.tool_cwd, cache=args.cache)
+            python = None
             if args.tool_ref:
                 if places.cache is None or places.tool_cwd is None:
                     print('run: --tool-ref needs the repository (--tool-cwd) and the cache (--cache)', file=sys.stderr)
                     return 1
                 cwd = extract_ref(places.tool_cwd, args.tool_ref, places.cache)
+                if not args.tool_cmd:
+                    print(f'[run] the venv of {args.tool_ref}, from its {cwd.name}/poetry.lock ...', flush=True)
+                    python = ensure_venv(cwd, places.cache, tool_python())
             else:
                 cwd = places.tool_cwd or Path.cwd()
-            tool = resolve_tool(cwd, args.tool_cmd, args.profile, args.tool_ref)
+            tool = resolve_tool(cwd, args.tool_cmd, args.profile, args.tool_ref, python=python)
             check_module(tool)
             runner = Runner.create(con, home, resolve_dataset(con, args.dataset), tool, opts, label=args.label)
         t = runner.tool
@@ -369,7 +374,10 @@ def build_parser() -> argparse.ArgumentParser:
         '--tool-cwd', help='the scanner checkout, or the repository of --tool-ref (default: $DSBENCH_TOOL_CWD)'
     )
     run.add_argument('--tool-cmd', help='the scanner command (default: python -W ignore -m deepsecrets)')
-    run.add_argument('--tool-ref', help="scan a ref's committed tree, extracted into $DSBENCH_CACHE/trees/")
+    run.add_argument(
+        '--tool-ref',
+        help="scan a ref's committed tree, extracted into $DSBENCH_CACHE/trees/, in a venv from that ref's poetry.lock",
+    )
     run.add_argument('--cache', help='venvs and release trees (default: $DSBENCH_CACHE)')
     run.add_argument(
         '--profile',

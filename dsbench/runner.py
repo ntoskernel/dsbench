@@ -212,7 +212,14 @@ class Runner:
         run_id = run_id or new_run_id(tool.profile)
         if con.execute('SELECT 1 FROM runs WHERE run_id = ?', [run_id]).fetchone() or home.run_dir(run_id).exists():
             raise RunError(f'run {run_id} exists already')
-        params = {**opts.params(), 'label': label, 'tool_ref': tool.ref, 'resumed_with': [], 'segments': []}
+        params = {
+            **opts.params(),
+            'label': label,
+            'tool_ref': tool.ref,
+            'tool_venv': tool.venv,
+            'resumed_with': [],
+            'segments': [],
+        }
         con.execute(
             '''INSERT INTO runs (run_id, dataset_id, tool_cmd, tool_cwd, tool_version, tool_commit, tool_digest,
                    profile, params, host, diagnostics, started_at, status)
