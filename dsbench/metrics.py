@@ -2,9 +2,10 @@
 
 The June view (`legacy/june.py`) takes June's own labelled rows (no extras, no row with a manual `problem` flag: 14,847
 secrets and 82,265 look-alikes) and asks of each whether the run found it. Here a row is found at a level when one of
-the CSV rows it stands for is paired by the `legacy` matcher with a finding whose confidence reaches the level's floor.
-The floors are the scanner's `CONFIDENCE_LEVELS` (`deepsecrets/config.py:16` at 2.2.0: low 0, medium 3, high 6,
-very-high 9), so a cut of a `low` run gives the findings a scan at that level reports. Beside it, the same rows per
+the CSV rows it stands for is paired by the `legacy` matcher with a finding whose tier is at least the level. The tier
+is the scanner's own (`sarif.py`: the rule id's suffix, else the rule descriptor's `precision`), so a cut of a `low`
+run gives the findings a scan at that level reports, whatever confidence that version's tiers start at (2.2.0's medium
+starts at 3, 2.3's at 5). A rejected candidate (`info`) is in no named level. Beside it, the same rows per
 (repository, value): one unit per repository, label and raw label value, found when any of its rows is, so copies of
 one value do not multiply. The value is not normalised: keyed raw, June's own rows give June's published 93.10%,
 while the `legacy` normalisation merges more and gives 92.61%. Precision in both is found secrets over found
@@ -23,10 +24,20 @@ import duckdb
 from dsbench.home import BenchHome
 from dsbench.legacy import june
 from dsbench.matcher import MATCHER_VERSIONS
-from dsbench.runner import DEEP_MAX_SIZE
+from dsbench.runner import DEEP_MAX_SIZE, fill_tiers
+from dsbench.sarif import TIERS
 from dsbench.store import fetch_dicts, get_run
 
-LEVELS = {'low': 0, 'medium': 3, 'high': 6, 'very-high': 9}
+# the named levels, lowest first; a finding is in a level when its tier ranks at least as high
+LEVELS = ('low', 'medium', 'high', 'very-high')
+TIER_RANK = {tier: rank for rank, tier in enumerate(TIERS)}
+
+
+def rank_sql(column: str) -> str:
+    """A finding's tier rank in SQL."""
+    return f'CASE {column} ' + ' '.join(f"WHEN '{t}' THEN {r}" for t, r in TIER_RANK.items()) + ' END'
+
+
 MATCHER = 'legacy'
 
 
@@ -38,8 +49,17 @@ def _ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
-def row_confidence(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER) -> Dict[int, int]:
-    """Each matched CSV row and the highest confidence of a finding paired with it."""
+def check_tiers(con: duckdb.DuckDBPyConnection, run_id: str) -> None:
+    untiered = con.execute('SELECT count(*) FROM findings WHERE run_id = ? AND tier IS NULL', [run_id]).fetchone()[0]
+    if untiered:
+        raise MetricsError(
+            f'{run_id} has {untiered:,} findings without a tier and no shard report that names one; '
+            f'run `dsbench match --run {run_id}` while its reports are in the run directory'
+        )
+
+
+def row_tier(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER) -> Dict[int, int]:
+    """Each matched CSV row and the highest tier rank of a finding paired with it."""
     versions = {
         v
         for (v,) in con.execute(
@@ -55,7 +75,7 @@ def row_confidence(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = M
         raise MetricsError(f'{run_id} has findings but no {matcher} pairs: run `dsbench match --run {run_id}`')
     return dict(
         con.execute(
-            '''SELECT m.row_id, max(coalesce(f.confidence, 0)) FROM matches m
+            f'''SELECT m.row_id, max({rank_sql('f.tier')}) FROM matches m
                JOIN findings f ON f.run_id = m.run_id AND f.finding_id = m.finding_id
                WHERE m.run_id = ? AND m.matcher = ? GROUP BY m.row_id''',
             [run_id, matcher],
@@ -63,9 +83,11 @@ def row_confidence(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = M
     )
 
 
-def found_at(best: Dict[int, int], floor: int) -> Callable[[june.JuneRow], bool]:
+def found_at(best: Dict[int, int], level: str) -> Callable[[june.JuneRow], bool]:
+    rank = TIER_RANK[level]
+
     def found(row: june.JuneRow) -> bool:
-        return any(best.get(int(i), -1) >= floor for i in row.csv_ids)
+        return any(best.get(int(i), -1) >= rank for i in row.csv_ids)
 
     return found
 
@@ -130,11 +152,12 @@ def _files(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
 
 
 def _findings(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
-    by_level = {}
-    for level, floor in LEVELS.items():
-        by_level[level] = con.execute(
-            'SELECT count(*) FROM findings WHERE run_id = ? AND coalesce(confidence, 0) >= ?', [run['run_id'], floor]
-        ).fetchone()[0]
+    by_tier = dict(
+        con.execute('SELECT tier, count(*) FROM findings WHERE run_id = ? GROUP BY 1', [run['run_id']]).fetchall()
+    )
+    by_level = {
+        level: sum(n for tier, n in by_tier.items() if TIER_RANK.get(tier, -1) >= TIER_RANK[level]) for level in LEVELS
+    }
     labelled = con.execute(
         '''SELECT f.labelled, count(*) FROM findings x JOIN files f ON f.dataset_id = ? AND f.file_id = x.file_id
            WHERE x.run_id = ? GROUP BY 1''',
@@ -146,6 +169,7 @@ def _findings(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
     ).fetchall()
     return {
         'by_level': by_level,
+        'by_tier': {tier: by_tier.get(tier, 0) for tier in TIERS},
         'in_labelled_files': dict(labelled).get(True, 0),
         'in_unlabelled_files': dict(labelled).get(False, 0),
         'by_rule': dict(rules),
@@ -188,7 +212,8 @@ def compute(
         except FileNotFoundError:
             # no `preserve` export in this bench home: everything but the June view is still counted
             rows, june_table = [], False
-    best = row_confidence(con, run_id)
+    check_tiers(con, run_id)
+    best = row_tier(con, run_id)
     label_of = {
         r['row_id']: (r['repo'], r['value'])
         for r in fetch_dicts(con, 'SELECT row_id, repo, value FROM labels WHERE dataset_id = ?', [run['dataset_id']])
@@ -201,8 +226,8 @@ def compute(
         # no June table, or not June's corpus: the June view would count a different set of rows
         june_way = per_unit = None
     else:
-        for level, floor in LEVELS.items():
-            found = found_at(best, floor)
+        for level in LEVELS:
+            found = found_at(best, level)
             june_way[level] = june.view(rows, found=found)
             per_unit[level] = unit_view(rows, label_of, found)
     dataset = con.execute('SELECT stats FROM datasets WHERE dataset_id = ?', [run['dataset_id']]).fetchone()
@@ -231,7 +256,7 @@ def compute(
         'files': _files(con, run),
         'findings': _findings(con, run),
         'matching': {'matcher': MATCHER, 'version': MATCHER_VERSIONS[MATCHER], 'pairs': pairs[0], 'rows': pairs[1]},
-        'levels': LEVELS,
+        'levels': {'named': list(LEVELS), 'cut': 'by the scanner\'s own tier of each finding'},
         'june_table': june_table,
         'june_rows_missing': missing,
         'june_way': june_way,
@@ -316,6 +341,7 @@ def _operations_lines(ops: Dict) -> List[str]:
 
 
 def write_metrics(con: duckdb.DuckDBPyConnection, home: BenchHome, run_id: str) -> Dict:
+    fill_tiers(con, home, run_id)
     m = compute(con, run_id, legacy_dir=home.legacy_dir)
     run_dir = home.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)

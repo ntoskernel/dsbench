@@ -166,3 +166,23 @@ def test_run_ids_name_the_time_and_profile_and_never_repeat(bench, home: BenchHo
     runner.Runner.create(con, home, dataset_id, tool, fast(), run_id='20260911-175031-all-files')
     with pytest.raises(runner.RunError):
         runner.Runner.create(con, home, dataset_id, tool, fast(), run_id='20260911-175031-all-files')
+
+
+def test_tiers_of_findings_stored_without_them_are_filled_from_suffixes_and_reports(bench, home: BenchHome):
+    con, dataset_id, tool = bench()
+    r = runner.Runner.create(con, home, dataset_id, tool, fast())
+    r.execute()
+    shard_id = con.execute('SELECT min(shard_id) FROM findings').fetchone()[0]
+    report = home.run_dir(r.run_id) / 'shards' / shard_id / 'report.sarif'
+    document = json.loads(report.read_text())
+    document['runs'][0]['tool']['driver']['rules'] = [{'id': 'S1', 'properties': {'precision': 'high'}}]
+    report.write_text(json.dumps(document))
+    con.execute("UPDATE findings SET tier = NULL, rule_id = 'S1' WHERE shard_id = ?", [shard_id])
+    con.execute("UPDATE findings SET tier = NULL WHERE shard_id <> ?", [shard_id])
+    con.execute(
+        "INSERT INTO findings (run_id, finding_id, shard_id, rule_id) VALUES (?, 99, ?, 'S2')", [r.run_id, shard_id]
+    )
+    assert runner.fill_tiers(con, home, r.run_id) == 1  # S2 has neither a suffix nor a descriptor
+    tiers = dict(con.execute('SELECT rule_id, tier FROM findings WHERE rule_id IN (\'S1\', \'S2\')').fetchall())
+    assert tiers == {'S1': 'high', 'S2': None}
+    assert con.execute("SELECT count(*) FROM findings WHERE rule_id LIKE '%-HIGH' AND tier = 'high'").fetchone()[0] >= 1

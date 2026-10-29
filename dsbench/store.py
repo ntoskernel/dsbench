@@ -4,7 +4,9 @@ home and nowhere else.
 
 Pairs carry `matches.matcher_version`, so pairs from another matcher version are never counted; `artifacts.depth`
 is the size tier the scanner applied to a file; `errors` holds one row per error notification the scanner reported,
-and `artifacts.errors` counts a file's notifications. Bulk inserts go through NDJSON staged in the bench home's `tmp/`, which DuckDB reads in one pass
+and `artifacts.errors` counts a file's notifications. `findings.tier` is the scanner's own tier for a finding and
+`findings.tags` its `properties.tags` as a JSON list. Columns added after a store was created arrive through
+`MIGRATIONS`, which every writing connection applies. Bulk inserts go through NDJSON staged in the bench home's `tmp/`, which DuckDB reads in one pass
 and dsbench deletes at once, since the rows can hold secrets."""
 
 import json
@@ -49,13 +51,19 @@ DDL = [
     '''CREATE TABLE IF NOT EXISTS findings (
         run_id VARCHAR, finding_id BIGINT, file_id VARCHAR, shard_id VARCHAR, rule_id VARCHAR, rule_base VARCHAR,
         confidence INTEGER, start_line INTEGER, end_line INTEGER, start_col INTEGER, end_col INTEGER, value VARCHAR,
-        fingerprint VARCHAR, PRIMARY KEY (run_id, finding_id))''',
+        fingerprint VARCHAR, tier VARCHAR, tags VARCHAR, PRIMARY KEY (run_id, finding_id))''',
     '''CREATE TABLE IF NOT EXISTS matches (
         run_id VARCHAR, matcher VARCHAR, matcher_version VARCHAR, finding_id BIGINT, row_id BIGINT, tier VARCHAR,
         line_delta INTEGER, PRIMARY KEY (run_id, matcher, finding_id, row_id))''',
     '''CREATE TABLE IF NOT EXISTS errors (
         run_id VARCHAR, shard_id VARCHAR, seq INTEGER, file_id VARCHAR, level VARCHAR, message VARCHAR,
         PRIMARY KEY (run_id, shard_id, seq))''',
+]
+
+# columns added after the first stores were created; each is idempotent
+MIGRATIONS = [
+    'ALTER TABLE findings ADD COLUMN IF NOT EXISTS tier VARCHAR',
+    'ALTER TABLE findings ADD COLUMN IF NOT EXISTS tags VARCHAR',
 ]
 
 
@@ -70,7 +78,7 @@ def connect(home: BenchHome, read_only: bool = False) -> duckdb.DuckDBPyConnecti
             raise StoreError(f'No store at {home.db_path}: run `dsbench prepare` first')
         return duckdb.connect(str(home.db_path), read_only=True)
     con = duckdb.connect(str(home.db_path))
-    for statement in DDL:
+    for statement in DDL + MIGRATIONS:
         con.execute(statement)
     return con
 

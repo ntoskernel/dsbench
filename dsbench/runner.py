@@ -29,7 +29,7 @@ from typing import Dict, IO, List, Optional, Tuple
 import duckdb
 
 from dsbench.home import BenchHome
-from dsbench.sarif import Report, SarifError, read_report
+from dsbench.sarif import TIER_SUFFIXES, Report, SarifError, read_report
 from dsbench.store import bulk_insert, fetch_dicts, get_run
 from dsbench.tool import Tool, resolve_tool
 
@@ -542,6 +542,8 @@ class Runner:
                     'end_col': r.end_col,
                     'value': r.value,
                     'fingerprint': r.fingerprint,
+                    'tier': r.tier,
+                    'tags': json.dumps(r.tags) if r.tags is not None else None,
                 }
             )
         note = f'{unknown} report entries outside the shard' if unknown else None
@@ -574,6 +576,33 @@ class Runner:
         t.unknown_uris += unknown
         for a in artifacts.values():
             t.statuses[a['status']] = t.statuses.get(a['status'], 0) + 1
+
+
+def fill_tiers(con: duckdb.DuckDBPyConnection, home: BenchHome, run_id: str) -> int:
+    """Tiers for findings stored before dsbench kept them: from the rule id's suffix, else from the rule descriptors of
+    the shard reports still in the run directory. Returns how many findings are left without a tier."""
+    cases = ' '.join(f"WHEN rule_id LIKE '%{suffix}' THEN '{suffix[1:].lower()}'" for suffix in TIER_SUFFIXES)
+    con.execute(
+        f'UPDATE findings SET tier = CASE {cases} END WHERE run_id = ? AND tier IS NULL',
+        [run_id],
+    )
+    left = con.execute(
+        'SELECT rule_id, min(shard_id) FROM findings WHERE run_id = ? AND tier IS NULL GROUP BY 1', [run_id]
+    ).fetchall()
+    reports: Dict[str, Dict[str, str]] = {}
+    for rule_id, shard_id in left:
+        if shard_id not in reports:
+            try:
+                reports[shard_id] = read_report(home.run_dir(run_id) / 'shards' / shard_id / 'report.sarif').rule_tiers
+            except SarifError:
+                reports[shard_id] = {}
+        tier = reports[shard_id].get(rule_id)
+        if tier:
+            con.execute(
+                'UPDATE findings SET tier = ? WHERE run_id = ? AND rule_id = ? AND tier IS NULL',
+                [tier, run_id, rule_id],
+            )
+    return con.execute('SELECT count(*) FROM findings WHERE run_id = ? AND tier IS NULL', [run_id]).fetchone()[0]
 
 
 def _kill_group(pid: int) -> None:

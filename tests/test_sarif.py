@@ -14,7 +14,17 @@ def location(uri, **region):
 DOCUMENT = {
     'runs': [
         {
-            'tool': {'driver': {'name': 'DeepSecrets', 'semanticVersion': '2.2.0', 'rules': []}},
+            'tool': {
+                'driver': {
+                    'name': 'DeepSecrets',
+                    'semanticVersion': '2.2.0',
+                    'rules': [
+                        {'id': 'S4', 'properties': {'precision': 'very-high'}},
+                        {'id': 'S105-VERY-HIGH', 'properties': {'precision': 'very-high'}},
+                        {'id': 'S19-INFO', 'properties': {'precision': 'low'}},
+                    ],
+                }
+            },
             'artifacts': [
                 {
                     'location': {'uri': 'r_1/src/app.py', 'uriBaseId': '%SRCROOT%'},
@@ -62,7 +72,11 @@ DOCUMENT = {
                         snippet={'text': 'a\nb\nc'},
                     ),
                 },
-                {'ruleId': 'S35-HIGH', 'properties': {'confidence': 7}, 'locations': location('r_1/src/app.py')},
+                {
+                    'ruleId': 'S35-HIGH',
+                    'properties': {'confidence': 7, 'tags': ['test-context', 'sequence']},
+                    'locations': location('r_1/src/app.py'),
+                },
                 {'ruleId': 'S19-INFO', 'properties': {'confidence': 0, 'rejected': True}, 'locations': location('x')},
             ],
         }
@@ -102,6 +116,9 @@ def test_results_artifacts_and_notifications_are_read():
     assert multi.value == 'a\nb\nc' and (multi.start_line, multi.end_line) == (5, 7) and multi.fingerprint is None
     assert no_region.start_line is None and no_region.value is None
     assert rejected.rejected and rejected.rule_base == 'S19'
+    # the tier: the suffix, else the descriptor's precision; a rejected candidate is info whatever its descriptor says
+    assert [r.tier for r in report.results] == ['very-high', 'very-high', 'high', 'info']
+    assert no_region.tags == ['test-context', 'sequence'] and first.tags is None
 
     ok, empty, skipped = report.artifacts
     assert (ok.uri, ok.status, ok.scan_time_ms, ok.depth, ok.length) == ('r_1/src/app.py', 'ok', 12.3, 'deep', 120)
@@ -110,6 +127,12 @@ def test_results_artifacts_and_notifications_are_read():
     assert [(n.uri, n.level, n.message) for n in report.notifications] == [
         ('r_1/empty.txt', 'error', 'Unable to open the file')
     ]
+
+
+def test_a_rule_without_suffix_or_descriptor_has_no_tier():
+    run = {'tool': {'driver': {'name': 'x', 'rules': [{'id': 'A', 'properties': {'precision': 'odd'}}]}}}
+    run['results'] = [{'ruleId': 'A', 'locations': location('f')}, {'ruleId': 'B-MEDIUM', 'locations': location('f')}]
+    assert [r.tier for r in sarif.parse({'runs': [run]}).results] == [None, 'medium']
 
 
 def test_a_report_without_diagnostics_says_so():

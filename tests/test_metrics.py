@@ -21,13 +21,13 @@ LABELS = [
     (6, 'repo-b', 'f3', 4, 'Mk3Vb8Qw1Zr5', True),
     (7, 'repo-b', 'f3', 2, 'Zx9Qm2Lp8Rt4', False),
 ]
-# (file, line, value, confidence)
+# (file, line, value, confidence, tier)
 FINDINGS = [
-    ('f1', 1, 'Tq7XbR2mKp9L', 10),
-    ('f3', 1, 'Zx9Qm2Lp8Rt4', 4),
-    ('f1', 2, 'hello', 2),
-    ('f3', 2, 'Zx9Qm2Lp8Rt4', 7),
-    ('f9', 1, 'unlabelled', 10),
+    ('f1', 1, 'Tq7XbR2mKp9L', 10, 'very-high'),
+    ('f3', 1, 'Zx9Qm2Lp8Rt4', 4, 'medium'),
+    ('f1', 2, 'hello', 2, 'low'),
+    ('f3', 2, 'Zx9Qm2Lp8Rt4', 7, 'high'),
+    ('f9', 1, 'unlabelled', 10, 'very-high'),
 ]
 ROWS = [
     JuneRow(row_id, (str(row_id),), file, line, label, 'not_a_secret' if row_id == 6 else None, False, None)
@@ -54,10 +54,10 @@ def con(home: BenchHome):
             "INSERT INTO runs (run_id, dataset_id, profile, params, status) VALUES ('r', 'd', 'all-files', ?, 'done')",
             [json.dumps(params)],
         )
-        for i, (file_id, line, value, confidence) in enumerate(FINDINGS, 1):
+        for i, (file_id, line, value, confidence, tier) in enumerate(FINDINGS, 1):
             con.execute(
-                'INSERT INTO findings (run_id, finding_id, file_id, start_line, value, confidence, rule_base) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                ['r', i, file_id, line, value, confidence, 'S105'],
+                'INSERT INTO findings (run_id, finding_id, file_id, start_line, value, confidence, tier, rule_base) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                ['r', i, file_id, line, value, confidence, tier, 'S105'],
             )
         for file_id in ('f1', 'f2', 'f3', 'f9'):
             con.execute(
@@ -82,6 +82,21 @@ def test_the_june_way_at_each_level(con):
     assert m['june_way']['low']['all_secrets'] == 4  # the flagged row counts only over all rows
     assert m['findings']['by_level'] == {'low': 5, 'medium': 4, 'high': 3, 'very-high': 2}
     assert (m['findings']['in_labelled_files'], m['findings']['in_unlabelled_files']) == (4, 1)
+
+
+def test_levels_follow_the_scanners_tiers_not_a_fixed_confidence(con):
+    # a scanner whose medium starts at 5 reports confidence 4 as low: the medium cut must leave it out
+    con.execute("UPDATE findings SET tier = 'low' WHERE confidence = 4")
+    m = metrics.compute(con, 'r', rows=ROWS)
+    assert m['june_way']['medium']['secrets_found'] == 1 and m['june_way']['low']['secrets_found'] == 2
+    assert m['findings']['by_level']['medium'] == 3 and m['findings']['by_tier']['low'] == 2
+    # a rejected candidate is in no named level
+    con.execute("UPDATE findings SET tier = 'info' WHERE finding_id = 1")
+    m = metrics.compute(con, 'r', rows=ROWS)
+    assert m['findings']['by_level']['low'] == 4 and m['findings']['by_tier']['info'] == 1
+    con.execute('UPDATE findings SET tier = NULL WHERE finding_id = 1')
+    with pytest.raises(metrics.MetricsError):
+        metrics.compute(con, 'r', rows=ROWS)
 
 
 def test_per_repository_and_value_a_copy_counts_once(con):

@@ -103,7 +103,10 @@ Beside it, the same rows per (repository, value): one unit per repository, label
 secret in many files count once.
 
 Both are reported at each confidence level the scanner offers (`low`, `medium`, `high`, `very-high`), cutting one
-`low` run at the level's confidence floor.
+`low` run by each finding's tier as the scanner itself reports it: the suffix of its rule id (`-LOW` to `-VERY-HIGH`;
+`-INFO` marks a rejected candidate, in no named level), else, for a rule of fixed confidence, the `precision` of its
+rule descriptor. A level therefore holds what that scanner version reports at that level, wherever its tiers start;
+the numeric confidence is stored beside the tier.
 
 Every stored pair carries the matcher's version; `metrics` refuses pairs from another version, so a matcher change
 means `dsbench match` again, never a silent mix.

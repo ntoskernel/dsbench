@@ -1,18 +1,27 @@
 """Reading the one thing dsbench takes from the scanner: its SARIF report.
 
-From each result: `ruleId` (its base without the tier suffix too), `properties.confidence`, `properties.rejected`, the
-artifact URI (a view path relative to the shard's target), the 1-based region (`endColumn` exclusive, columns in code
-points) and its `snippet.text`, which is the raw detection when the scan ran with `--disable-masking`, and
-`partialFingerprints['dsfpx/v1']`. With `--report-diagnostics`, every discovered file in `run.artifacts` with its
-`status`, `scanTimeMs`, `depth` and `skipReason`, and every error notification in `run.invocations`."""
+From each result: `ruleId` (its base without the tier suffix too), `properties.confidence`, `properties.rejected`,
+`properties.tags` (from DeepSecrets 2.3), the artifact URI (a view path relative to the shard's target), the 1-based
+region (`endColumn` exclusive, columns in code points) and its `snippet.text`, which is the raw detection when the scan
+ran with `--disable-masking`, and `partialFingerprints['dsfpx/v1']`. With `--report-diagnostics`, every discovered file
+in `run.artifacts` with its `status`, `scanTimeMs`, `depth` and `skipReason`, and every error notification in
+`run.invocations`.
+
+Each result's tier is the scanner's own: the suffix of its rule id (`-LOW`, `-MEDIUM`, `-HIGH`, `-VERY-HIGH`, and
+`-INFO` for a candidate the scanner rejected), else, for a rule of fixed confidence whose id carries no suffix, the
+`precision` its rule descriptor in `tool.driver.rules` gives. A level is then cut by tier, so it holds what that scanner
+version reports at that level, wherever the version puts its tier boundaries; the numeric confidence is kept beside it.
+"""
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # the scanner's tier suffixes, longest first so `-VERY-HIGH` is not read as `-HIGH`
 TIER_SUFFIXES = ('-VERY-HIGH', '-MEDIUM', '-HIGH', '-LOW', '-INFO')
+# tiers from the lowest; `info` is a rejected candidate, reported only at `--confidence-level all`
+TIERS = ('info', 'low', 'medium', 'high', 'very-high')
 
 
 class SarifError(Exception):
@@ -32,6 +41,8 @@ class Result:
     value: Optional[str]
     fingerprint: Optional[str]
     rejected: bool = False
+    tier: Optional[str] = None
+    tags: Optional[List[str]] = None
 
 
 @dataclass
@@ -59,6 +70,8 @@ class Report:
     artifacts: List[Artifact] = field(default_factory=list)
     notifications: List[Notification] = field(default_factory=list)
     has_diagnostics: bool = False
+    # rule id -> the tier its descriptor declares
+    rule_tiers: Dict[str, str] = field(default_factory=dict)
 
 
 def rule_base(rule_id: str) -> str:
@@ -68,16 +81,35 @@ def rule_base(rule_id: str) -> str:
     return rule_id
 
 
+def suffix_tier(rule_id: str) -> Optional[str]:
+    """The tier a rule id's suffix names, if it has one."""
+    for suffix in TIER_SUFFIXES:
+        if rule_id.endswith(suffix):
+            return suffix[1:].lower()
+    return None
+
+
+def descriptor_tiers(driver: dict) -> Dict[str, str]:
+    tiers = {}
+    for rule in driver.get('rules') or []:
+        precision = str((rule.get('properties') or {}).get('precision') or '').lower()
+        if rule.get('id') and precision in TIERS:
+            tiers[rule['id']] = precision
+    return tiers
+
+
 def _physical(location: dict) -> dict:
     return (location or {}).get('physicalLocation') or {}
 
 
-def _result(raw: dict) -> Result:
+def _result(raw: dict, rule_tiers: Dict[str, str]) -> Result:
     physical = _physical((raw.get('locations') or [{}])[0])
     region = physical.get('region') or {}
     properties = raw.get('properties') or {}
     rule_id = raw.get('ruleId') or ''
     confidence = properties.get('confidence')
+    rejected = bool(properties.get('rejected', False))
+    tags = properties.get('tags')
     return Result(
         uri=(physical.get('artifactLocation') or {}).get('uri') or '',
         rule_id=rule_id,
@@ -89,7 +121,9 @@ def _result(raw: dict) -> Result:
         end_col=region.get('endColumn'),
         value=(region.get('snippet') or {}).get('text'),
         fingerprint=(raw.get('partialFingerprints') or {}).get('dsfpx/v1'),
-        rejected=bool(properties.get('rejected', False)),
+        rejected=rejected,
+        tier='info' if rejected else suffix_tier(rule_id) or rule_tiers.get(rule_id),
+        tags=[str(t) for t in tags] if isinstance(tags, list) else None,
     )
 
 
@@ -119,7 +153,8 @@ def parse(document: dict) -> Report:
     run = runs[0]
     driver = (run.get('tool') or {}).get('driver') or {}
     report = Report(tool_name=driver.get('name'), tool_version=driver.get('semanticVersion') or driver.get('version'))
-    report.results = [_result(r) for r in run.get('results') or []]
+    report.rule_tiers = descriptor_tiers(driver)
+    report.results = [_result(r, report.rule_tiers) for r in run.get('results') or []]
     report.has_diagnostics = 'artifacts' in run
     report.artifacts = [_artifact(a) for a in run.get('artifacts') or []]
     for invocation in run.get('invocations') or []:
