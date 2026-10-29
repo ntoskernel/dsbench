@@ -39,7 +39,7 @@ import duckdb
 from dsbench.home import BenchHome
 from dsbench.sarif import TIER_SUFFIXES, Report, SarifError, read_report
 from dsbench.store import bulk_insert, fetch_dicts, get_run
-from dsbench.tool import Tool, resolve_tool
+from dsbench.tool import Tool, resolve_thirdparty, resolve_tool
 
 SOLO_BYTES = 5_000_000
 MAX_FILES = 2_000
@@ -211,11 +211,12 @@ def host_info(tool: Tool) -> Dict:
                 break
     except OSError:
         pass
-    try:
-        done = subprocess.run([tool.cmd[0], '--version'], capture_output=True, text=True, timeout=60)
-        info['tool_python'] = (done.stdout or done.stderr).strip() or None
-    except OSError:
-        info['tool_python'] = None
+    if tool.kind == 'deepsecrets':
+        try:
+            done = subprocess.run([tool.cmd[0], '--version'], capture_output=True, text=True, timeout=60)
+            info['tool_python'] = (done.stdout or done.stderr).strip() or None
+        except OSError:
+            info['tool_python'] = None
     return info
 
 
@@ -269,6 +270,8 @@ class Runner:
             'label': label,
             'tool_ref': tool.ref,
             'tool_venv': tool.venv,
+            'tool_kind': tool.kind,
+            'tool_config': tool.config,
             'resumed_with': [],
             'segments': [],
         }
@@ -299,8 +302,12 @@ class Runner:
     @classmethod
     def resume(cls, con: duckdb.DuckDBPyConnection, home: BenchHome, run_id: str, opts: RunOptions) -> 'Runner':
         run = get_run(con, run_id)
-        recorded_cmd = shlex.join(json.loads(run['tool_cmd']))
-        tool = resolve_tool(Path(run['tool_cwd']), recorded_cmd, run['profile'], run['params'].get('tool_ref'))
+        kind = run['params'].get('tool_kind') or 'deepsecrets'
+        if kind == 'deepsecrets':
+            recorded_cmd = shlex.join(json.loads(run['tool_cmd']))
+            tool = resolve_tool(Path(run['tool_cwd']), recorded_cmd, run['profile'], run['params'].get('tool_ref'))
+        else:
+            tool = resolve_thirdparty(kind, Path(run['tool_cwd']).parents[1], run['profile'])
         if run['tool_digest'] and tool.digest != run['tool_digest']:
             raise RunError(f'the scanner in {tool.cwd} changed since {run_id} started (source digest differs)')
         con.begin()
@@ -387,7 +394,10 @@ class Runner:
         for f in shard.files:
             link = target / f['view_path']
             link.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(self.files_dir / f['file_id'], link)
+            if self.tool.copies_files:
+                shutil.copyfile(self.files_dir / f['file_id'], link)
+            else:
+                os.symlink(self.files_dir / f['file_id'], link)
         report = shard_dir / 'report.sarif'
         report.unlink(missing_ok=True)
         log = open(shard_dir / 'scanner.log', 'wb')
@@ -504,9 +514,13 @@ class Runner:
             failure = f'exit {exit_code}'
         else:
             try:
-                report = read_report(self._shard_dir(shard.shard_id) / 'report.sarif')
+                shard_dir = self._shard_dir(shard.shard_id)
+                report = self.tool.read_report(shard_dir / 'report.sarif', shard_dir / 'target')
             except SarifError as e:
                 failure = f'report unreadable: {e}'
+        if self.tool.copies_files:
+            # the copies are only the scanner's input
+            shutil.rmtree(self._shard_dir(shard.shard_id) / 'target', ignore_errors=True)
         measured = [exit_code, wall, cpu, rss_mb, datetime.now()]
         if failure is None:
             self._ingest(shard, report, measured)
@@ -570,10 +584,12 @@ class Runner:
                 'depth': a.depth,
                 'errors': errors_by_file.get(file_id, 0),
             }
+        # a scanner without per-file diagnostics read every file of a shard it finished
+        default_status = 'missing' if report.has_diagnostics else 'ok'
         for f in shard.files:
             artifacts.setdefault(
                 f['file_id'],
-                {'run_id': self.run_id, 'file_id': f['file_id'], 'shard_id': shard.shard_id, 'status': 'missing'},
+                {'run_id': self.run_id, 'file_id': f['file_id'], 'shard_id': shard.shard_id, 'status': default_status},
             )
         findings = []
         for r in report.results:

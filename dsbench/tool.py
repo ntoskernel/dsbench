@@ -127,8 +127,29 @@ class Tool:
     digest: Optional[str]
     ref: Optional[str] = None
     venv: Optional[str] = None
+    # 'deepsecrets', or a released scanner of `thirdparty.RELEASES` with its config
+    kind: str = 'deepsecrets'
+    config: Optional[str] = None
+
+    @property
+    def copies_files(self) -> bool:
+        """Other scanners resolve symlinks and would judge the corpus's flat file names, so they get copies."""
+        return self.kind != 'deepsecrets'
+
+    def read_report(self, path: Path, target: Path):
+        if self.kind == 'deepsecrets':
+            from dsbench.sarif import read_report
+
+            return read_report(path)
+        from dsbench import thirdparty
+
+        return thirdparty.read_report(path, target, thirdparty.RELEASES[self.kind])
 
     def args(self, target: Path, report: Path, process_count: int) -> List[str]:
+        if self.kind != 'deepsecrets':
+            from dsbench import thirdparty
+
+            return thirdparty.args(self.cmd[0], Path(self.config), target, report)
         return [
             *self.cmd,
             '--target-dir',
@@ -153,6 +174,8 @@ class Tool:
             env['PATH'] = os.pathsep.join(d for d in env.get('PATH', '').split(os.pathsep) if d and d != bin_dir)
         env.pop('PYTHONPATH', None)
         env.pop('PYTHONHOME', None)
+        if self.kind != 'deepsecrets':
+            env['GOMAXPROCS'] = '1'
         return env
 
     def describe(self) -> Dict:
@@ -165,6 +188,8 @@ class Tool:
             'digest': self.digest,
             'ref': self.ref,
             'venv': self.venv,
+            'kind': self.kind,
+            'config': self.config,
         }
 
 
@@ -330,3 +355,33 @@ def ensure_venv(tree: Path, cache: Path, python: str) -> str:
     }
     (venv / VENV_MARKER).write_text(json.dumps(marker, indent=2) + '\n')
     return str(interpreter)
+
+
+def resolve_thirdparty(name: str, cache: Path, profile: str = DEFAULT_PROFILE) -> Tool:
+    """A fetched release of another scanner, with the config of the profile."""
+    from dsbench import thirdparty
+
+    if name not in thirdparty.RELEASES:
+        raise ToolError(f'unknown tool {name!r}; known: deepsecrets, {", ".join(thirdparty.RELEASES)}')
+    release = thirdparty.RELEASES[name]
+    where = thirdparty.tool_dir(cache, release)
+    marker = where / thirdparty.MARKER
+    if not marker.is_file():
+        raise ToolError(f'{name} {release.version} is not in {cache}: run `dsbench tools fetch {name}`')
+    recorded = json.loads(marker.read_text())
+    profile = resolve_profile(profile)
+    config = where / thirdparty.config_for(profile)
+    binary = where / release.binary
+    digest = hashlib.sha256((binary.read_bytes() + config.read_bytes())).hexdigest()
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != recorded['binary_sha256']:
+        raise ToolError(f'{binary} is not the binary fetched from {release.url}')
+    return Tool(
+        cmd=(str(binary),),
+        cwd=where,
+        profile=profile,
+        version=release.version,
+        commit=None,
+        digest=digest,
+        kind=name,
+        config=str(config),
+    )

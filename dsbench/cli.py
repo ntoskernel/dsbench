@@ -23,6 +23,7 @@ from dsbench.legacy import june, pgcopy
 from dsbench.matcher import MatcherError
 from dsbench.metrics import MetricsError
 from dsbench.places import PlacesError, resolve_places
+from dsbench.thirdparty import ThirdPartyError
 from dsbench.runner import DEFAULT_SEED, RunError, RunOptions
 from dsbench.store import StoreError
 from dsbench.tool import DEFAULT_PROFILE, PROFILE_ALIASES, PROFILES, ToolError
@@ -143,7 +144,7 @@ def _run(args, opts: RunOptions, home) -> int:
     from dsbench.runner import Runner
     from dsbench.store import connect, resolve_dataset
     from dsbench.places import tool_python
-    from dsbench.tool import check_module, ensure_venv, extract_ref, resolve_tool
+    from dsbench.tool import check_module, ensure_venv, extract_ref, resolve_thirdparty, resolve_tool
 
     with connect(home) as con:
         if args.resume:
@@ -151,7 +152,12 @@ def _run(args, opts: RunOptions, home) -> int:
         else:
             places = resolve_places(tool_cwd=args.tool_cwd, cache=args.cache)
             python = None
-            if args.tool_ref:
+            if args.tool != 'deepsecrets':
+                if places.cache is None:
+                    print(f'run: --tool {args.tool} needs the cache (--cache) it was fetched into', file=sys.stderr)
+                    return 1
+                tool = resolve_thirdparty(args.tool, places.cache, args.profile)
+            elif args.tool_ref:
                 if places.cache is None or places.tool_cwd is None:
                     print('run: --tool-ref needs the repository (--tool-cwd) and the cache (--cache)', file=sys.stderr)
                     return 1
@@ -161,8 +167,9 @@ def _run(args, opts: RunOptions, home) -> int:
                     python = ensure_venv(cwd, places.cache, tool_python())
             else:
                 cwd = places.tool_cwd or Path.cwd()
-            tool = resolve_tool(cwd, args.tool_cmd, args.profile, args.tool_ref, python=python)
-            check_module(tool)
+            if args.tool == 'deepsecrets':
+                tool = resolve_tool(cwd, args.tool_cmd, args.profile, args.tool_ref, python=python)
+                check_module(tool)
             runner = Runner.create(
                 con,
                 home,
@@ -174,8 +181,11 @@ def _run(args, opts: RunOptions, home) -> int:
                 labelled_only=args.labelled_only,
             )
         t = runner.tool
+        name = 'DeepSecrets' if t.kind == 'deepsecrets' else t.kind
         print(
-            f'[run] {runner.run_id}: DeepSecrets {t.version} at {t.commit} in {t.cwd}, profile {t.profile}, '
+            f'[run] {runner.run_id}: {name} {t.version}'
+            + (f' at {t.commit}' if t.commit else '')
+            + f' in {t.cwd}, profile {t.profile}, '
             f'{len(runner.queue):,} shards for {runner.total_files - runner.tally.files_done:,} files, '
             f'--cores {opts.cores}',
             flush=True,
@@ -370,6 +380,24 @@ def cmd_watch(args) -> int:
         return 0
 
 
+def cmd_tools(args) -> int:
+    from dsbench import thirdparty
+
+    places = resolve_places(cache=args.cache)
+    if places.cache is None:
+        print('tools: pass --cache or set DSBENCH_CACHE', file=sys.stderr)
+        return 1
+    unknown = [n for n in args.names if n not in thirdparty.RELEASES]
+    if unknown:
+        print(f'tools: unknown {", ".join(unknown)}; known: {", ".join(thirdparty.RELEASES)}', file=sys.stderr)
+        return 1
+    for name in args.names or list(thirdparty.RELEASES):
+        where = thirdparty.fetch(name, places.cache)
+        marker = json.loads((where / thirdparty.MARKER).read_text())
+        print(f"{name} {marker['version']}: {where} (archive {marker['sha256'][:12]}, verified)")
+    return 0
+
+
 def cmd_status(args) -> int:
     from dsbench.store import connect
 
@@ -402,8 +430,10 @@ def cmd_status(args) -> int:
                FROM runs r ORDER BY r.started_at'''
         ).fetchall():
             label = json.loads(params).get('label')
+            kind = json.loads(params).get('tool_kind') or 'deepsecrets'
+            name = {'deepsecrets': 'DeepSecrets', 'betterleaks': 'Betterleaks'}.get(kind, kind)
             print(
-                f"  {run_id}  {status:<11} DeepSecrets {version} at {commit}  {files:,} files, {findings:,} findings"
+                f"  {run_id}  {status:<11} {name} {version} at {commit}  {files:,} files, {findings:,} findings"
                 + (f'  [{label}]' if label else '')
             )
     return 0
@@ -441,6 +471,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--dataset', default='latest', help='a dataset id (default: the latest prepared)')
     run.add_argument(
         '--tool-cwd', help='the scanner checkout, or the repository of --tool-ref (default: $DSBENCH_TOOL_CWD)'
+    )
+    run.add_argument(
+        '--tool',
+        default='deepsecrets',
+        choices=['deepsecrets', 'gitleaks', 'betterleaks'],
+        help='the scanner: DeepSecrets (default), or a release fetched with `dsbench tools fetch`',
     )
     run.add_argument('--tool-cmd', help='the scanner command (default: python -W ignore -m deepsecrets)')
     run.add_argument(
@@ -500,6 +536,13 @@ def build_parser() -> argparse.ArgumentParser:
     cmp.add_argument('--seed', type=int, default=1, help='the bootstrap seed (default: 1)')
     cmp.set_defaults(func=cmd_compare)
 
+    tools = sub.add_parser('tools', help='other scanners: fetch the pinned gitleaks and Betterleaks releases')
+    tools_sub = tools.add_subparsers(dest='tools_command', required=True)
+    fetch = tools_sub.add_parser('fetch', help='download, verify and unpack into $DSBENCH_CACHE/tools/')
+    fetch.add_argument('names', nargs='*', metavar='NAME', help='gitleaks, betterleaks (default: both)')
+    fetch.add_argument('--cache', help='where to keep them (default: $DSBENCH_CACHE)')
+    fetch.set_defaults(func=cmd_tools)
+
     status = sub.add_parser('status', help='datasets and runs')
     status.set_defaults(func=cmd_status)
 
@@ -527,6 +570,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         DiagnoseError,
         CompareError,
         DarkMatterError,
+        ThirdPartyError,
     ) as e:
         print(f'dsbench: {e}', file=sys.stderr)
         return 1

@@ -179,7 +179,7 @@ def _findings(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
     ).fetchall()
     return {
         'by_level': by_level,
-        'by_tier': {tier: by_tier.get(tier, 0) for tier in TIERS},
+        'by_tier': {tier: by_tier.get(tier, 0) for tier in (*TIERS, 'none') if tier != 'none' or by_tier.get(tier)},
         'in_labelled_files': dict(labelled).get(True, 0),
         'in_unlabelled_files': dict(labelled).get(False, 0),
         'by_rule': dict(rules),
@@ -237,6 +237,12 @@ def located_view(con: duckdb.DuckDBPyConnection, run: Dict, scope: Optional[set]
     return {
         'matcher': 'located',
         'version': MATCHER_VERSIONS['located'],
+        'tiered': bool(
+            con.execute(
+                "SELECT count(*) FROM findings WHERE run_id = ? AND tier IN ('low', 'medium', 'high', 'very-high')",
+                [run['run_id']],
+            ).fetchone()[0]
+        ),
         'labels_located': kinds,
         **counting.count(labels, pairs),
         'by_tag': counting.tag_views(labels, pairs, counting.finding_tags(con, run['run_id'])),
@@ -297,6 +303,9 @@ def compute(
             'status': run['status'],
             'profile': run['profile'],
             'label': run['params'].get('label'),
+            'tool_name': {'gitleaks': 'gitleaks', 'betterleaks': 'Betterleaks'}.get(
+                run['params'].get('tool_kind'), 'DeepSecrets'
+            ),
             'tool': {
                 'cwd': run['tool_cwd'],
                 'ref': run['params'].get('tool_ref'),
@@ -372,7 +381,7 @@ def summary_markdown(m: Dict) -> str:
     lines = [
         f"# {run['run_id']}",
         '',
-        f"- Scanner: DeepSecrets {tool['version']} at {tool['commit'] or 'unknown commit'}"
+        f"- Scanner: {run.get('tool_name', 'DeepSecrets')} {tool['version']} at {tool['commit'] or 'unknown commit'}"
         + (f" (ref `{tool['ref']}`)" if tool['ref'] else '')
         + f", source digest `{(tool['digest'] or '')[:12]}`",
         f"- Profile: `{run['profile']}`" + (f"; label: {run['label']}" if run['label'] else ''),
@@ -424,11 +433,17 @@ def summary_markdown(m: Dict) -> str:
         *_tag_lines(loc.get('by_tag') or {}),
         '## Reliability of each tier (candidate groups, at the best tier that found or charged them)',
         '',
-        '| Tier | Real | Look-alikes | Share real |',
-        '| --- | ---: | ---: | ---: |',
         *(
-            f"| {tier} | {v['real_groups']:,} | {v['lookalike_groups']:,} | {_pct(v['secret_share'])} |"
-            for tier, v in loc['reliability'].items()
+            [
+                '| Tier | Real | Look-alikes | Share real |',
+                '| --- | ---: | ---: | ---: |',
+                *(
+                    f"| {tier} | {v['real_groups']:,} | {v['lookalike_groups']:,} | {_pct(v['secret_share'])} |"
+                    for tier, v in loc['reliability'].items()
+                ),
+            ]
+            if loc.get('tiered', True)
+            else ['The scanner grades no finding: every level counts every finding.']
         ),
         '',
         'Findings outside the labels: '

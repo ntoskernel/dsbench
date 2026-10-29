@@ -38,6 +38,8 @@ from dsbench.sarif import TIERS
 
 LEVELS = ('low', 'medium', 'high', 'very-high')
 TIER_RANK = {tier: rank for rank, tier in enumerate(TIERS)}
+# a scanner without tiers (gitleaks) reports every finding at every level
+TIER_RANK['none'] = TIER_RANK['very-high']
 _UNIT_DROP = str.maketrans('', '', ' \t\r\n"\'`.-/+\\')
 
 

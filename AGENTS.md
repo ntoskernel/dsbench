@@ -45,6 +45,7 @@ stored findings again (the first `located` match of a dataset reads the whole co
 | `places.py`, `home.py` | The places and their separation; the bench home's layout |
 | `store.py` | The DuckDB store (`bench.duckdb` in the bench home) and its bulk inserts |
 | `dataset.py` | `prepare`: the CSV and the corpus listing into the store, the scanner's view of the corpus, candidate groups and fragments |
+| `thirdparty.py` | gitleaks and Betterleaks: pinned releases, fetching and checking them, configs, their JSON reports |
 | `tool.py` | The scanner as a subprocess: command, profiles, version, commit, source digest, release trees and their venvs |
 | `runner.py` | `run`: shards, the scheduler, timeouts and splits, ingestion, `--resume`, `progress.json` |
 | `sarif.py` | Reading the scanner's SARIF report |

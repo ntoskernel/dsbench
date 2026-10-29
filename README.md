@@ -62,6 +62,8 @@ dsbench watch                          # in another terminal: live progress and 
 dsbench status                         # datasets and runs
 dsbench run --tool-ref v2.1.1          # a release's committed tree, in a venv from its own poetry.lock
 dsbench run --sample 3000 --seed 11    # the reference sample: 3,000 labelled files, 1.4 GB
+dsbench tools fetch                    # the pinned gitleaks and Betterleaks releases, checked by SHA-256
+dsbench run --tool gitleaks            # another scanner, every file, its global path allowlist stripped
 dsbench run --resume <run_id>          # continue an interrupted run with its own scanner
 dsbench match --run <run_id>           # pair findings with labels again (after a matcher change)
 dsbench match --run <run_id> --matcher located --processes 16   # one matcher, its corpus reads in 16 processes
@@ -140,6 +142,16 @@ the numeric confidence is stored beside the tier.
 
 Every stored pair carries the matcher's version; `metrics` refuses pairs from another version, so a matcher change
 means `dsbench match` again, never a silent mix.
+
+## Other scanners
+
+`run --tool gitleaks` and `run --tool betterleaks` measure those scanners under the same harness, from releases pinned
+by version and SHA-256 (`tools fetch` downloads them into the cache and refuses any other bytes). Their rules are used
+as released; the `all-files` profile strips only each tool's global path allowlist, which would skip `node_modules/`,
+`vendor/`, lock files and the like, and validation against live services is never enabled. Each shard gets copies of
+its files at their repository paths, since both tools resolve symlinks and would judge the corpus's flat file names,
+and each tool process runs on one CPU (`GOMAXPROCS=1`), so `--cores` means the same as for DeepSecrets. Betterleaks'
+`low`/`medium`/`high` grade is a finding's tier; gitleaks grades nothing, so its findings count at every level.
 
 ## Comparing runs
 
