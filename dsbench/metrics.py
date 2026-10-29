@@ -233,11 +233,13 @@ def located_view(con: duckdb.DuckDBPyConnection, run: Dict, scope: Optional[set]
     by_confidence = counting.count(
         labels, counting.located_pairs(con, run['run_id'], confidence), counting.CONFIDENCE_CUTS
     )
+    pairs = counting.located_pairs(con, run['run_id'], rank_sql('f.tier'))
     return {
         'matcher': 'located',
         'version': MATCHER_VERSIONS['located'],
         'labels_located': kinds,
-        **counting.count(labels, counting.located_pairs(con, run['run_id'], rank_sql('f.tier'))),
+        **counting.count(labels, pairs),
+        'by_tag': counting.tag_views(labels, pairs, counting.finding_tags(con, run['run_id'])),
         'by_min_confidence': {
             'per_group': by_confidence['per_group'],
             'per_repository_and_value': by_confidence['per_repository_and_value'],
@@ -340,6 +342,29 @@ def _scores_table(view: Dict, findings: Optional[Dict] = None, fpr: bool = True)
     return lines + ['']
 
 
+def _tag_lines(by_tag: Dict) -> List[str]:
+    if not by_tag:
+        return []
+    lines = [
+        '## By tag (`--exclude-tags`; per candidate group, then (repository, value))',
+        '',
+        'What each tag\'s findings reach on the labels, and the scores of a scan that leaves them out.',
+        '',
+        '| Tag | Level | Findings | Real groups reached | Look-alike groups reached | Recall without | '
+        'Precision without | Unit recall without | Unit precision without |',
+        '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    ]
+    for name, v in by_tag.items():
+        for level in ('low', 'medium'):
+            reach, g = v['reach']['per_group'][level], v['without']['per_group'][level]
+            u = v['without']['per_repository_and_value'][level]
+            lines.append(
+                f"| `{name}` | {level} | {v['findings']:,} | {reach['real']:,} | {reach['lookalike']:,} "
+                f"| {_pct(g['recall'])} | {_pct(g['precision'])} | {_pct(u['recall'])} | {_pct(u['precision'])} |"
+            )
+    return lines + ['']
+
+
 def summary_markdown(m: Dict) -> str:
     run, files, ops, loc = m['run'], m['files'], m['operations'], m['located']
     tool = run['tool']
@@ -396,6 +421,7 @@ def summary_markdown(m: Dict) -> str:
             )
         ),
         '',
+        *_tag_lines(loc.get('by_tag') or {}),
         '## Reliability of each tier (candidate groups, at the best tier that found or charged them)',
         '',
         '| Tier | Real | Look-alikes | Share real |',

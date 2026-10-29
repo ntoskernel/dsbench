@@ -208,3 +208,14 @@ def test_the_summary_says_when_the_scanner_has_no_size_tier_and_when_a_run_was_r
     summary = metrics.summary_markdown(metrics.compute(con, 'r', rows=ROWS))
     assert 'The scanner reports no depth: it has no size tier.' in summary
     assert 'at `--cores 30` (resumed at 30, 12); wall 3.0 min over 3 segment(s)' in summary
+
+
+def test_tagged_findings_get_exclude_tags_views(con):
+    con.execute('''UPDATE findings SET tags = '["test-context"]' WHERE finding_id = 1''')
+    m = metrics.compute(con, 'r', rows=ROWS)
+    tc = m['located']['by_tag']['test-context']
+    assert tc['findings'] == 1 and tc['reach']['per_group']['low'] == {'real': 1, 'lookalike': 0}
+    assert tc['without']['per_group']['low']['secrets_found'] == 1
+    assert '| `test-context` | low | 1 | 1 | 0 |' in metrics.summary_markdown(m)
+    con.execute('UPDATE findings SET tags = NULL')
+    assert metrics.compute(con, 'r', rows=ROWS)['located']['by_tag'] == {}

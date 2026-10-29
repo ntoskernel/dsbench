@@ -63,3 +63,17 @@ def test_numeric_cuts_count_pairs_by_their_confidence():
     assert set(c) == {'per_group', 'per_repository_and_value', 'per_row'} and len(c['per_group']) == 11
     group = {cut: (v['secrets_found'], v['lookalikes_found']) for cut, v in c['per_group'].items()}
     assert group['0'] == group['1'] == (2, 3) and group['5'] == (1, 1) and group['10'] == (0, 0)
+
+
+def test_tag_views_count_what_a_tag_reaches_and_the_scores_without_it():
+    tags = {13: frozenset({'test-context'}), 15: frozenset({'test-context', 'publishable'})}
+    views = counting.tag_views(counting.Labels(ROWS), PAIRS, tags)
+    assert list(views) == ['publishable', 'test-context', 'all']
+    tc = views['test-context']
+    assert tc['findings'] == 2
+    # finding 15 finds real row 6; finding 13 is charged for row 4
+    assert tc['reach']['per_group']['low'] == {'real': 1, 'lookalike': 1}
+    # without them: group 6 is lost, group 4 no longer charged; and row 7, which finding 15 overlapped, still uncharged
+    without = tc['without']['per_group']['low']
+    assert (without['secrets_found'], without['lookalikes_found']) == (1, 2)
+    assert views['all']['findings'] == 2 and counting.tag_views(counting.Labels(ROWS), PAIRS, {}) == {}

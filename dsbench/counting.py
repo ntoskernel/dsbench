@@ -16,13 +16,20 @@ fragment is a piece of. Unlabelled findings ("extras") enter no precision.
   charged. On SecretBench that gives 4,125 real units.
 - **Per row.** Each CSV row as given, beside the June view's per-row count on June's own rows.
 
+DeepSecrets 2.3 tags findings (`properties.tags`: `weak-password`, `test-context`, `publishable`) and can leave a tag
+out with `--exclude-tags`. Each tag a run's findings carry gets two counts from the same pairs: what its findings reach
+(the real groups they find and the look-alike groups they are charged for, as if they were the only findings), and
+every view without them, which is what a scan with `--exclude-tags TAG` reports. With more than one tag, `all` leaves
+every tagged finding out.
+
 The reliability table is per tier rather than per level: each found real group and each charged look-alike group at
 the best tier of the findings that found or charged it, and the share of real secrets among them.
 
 A run of a sample counts only the labels of the files it scanned."""
 
+import json
 from collections import Counter, defaultdict
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 import duckdb
 
@@ -186,3 +193,37 @@ def extras(con: duckdb.DuckDBPyConnection, run: Dict, rank_sql: str, scope: Opti
         ]
         out[level] = {'in_labelled_files': sum(kept), 'in_unlabelled_files': len(kept) - sum(kept)}
     return out
+
+
+def finding_tags(con: duckdb.DuckDBPyConnection, run_id: str) -> Dict[int, FrozenSet[str]]:
+    """The tags of every tagged finding of a run."""
+    tags = {}
+    for finding_id, raw in con.execute(
+        'SELECT finding_id, tags FROM findings WHERE run_id = ? AND tags IS NOT NULL', [run_id]
+    ).fetchall():
+        names = frozenset(str(t) for t in json.loads(raw) if t)
+        if names:
+            tags[finding_id] = names
+    return tags
+
+
+def tag_views(labels: Labels, pairs: List[Tuple[int, int, bool, int]], tags: Dict[int, FrozenSet[str]]) -> Dict:
+    """Per tag: its findings, what they reach, and every view without them (`--exclude-tags`)."""
+    names = sorted({t for ts in tags.values() for t in ts})
+    views = {}
+    for name in names + (['all'] if len(names) > 1 else []):
+        tagged = {f for f, ts in tags.items() if name == 'all' or name in ts}
+        reach = count(labels, [p for p in pairs if p[0] in tagged])
+        without = count(labels, [p for p in pairs if p[0] not in tagged])
+        views[name] = {
+            'findings': len(tagged),
+            'reach': {
+                view: {
+                    level: {'real': v['secrets_found'], 'lookalike': v['lookalikes_found']}
+                    for level, v in reach[view].items()
+                }
+                for view in ('per_group', 'per_repository_and_value')
+            },
+            'without': {view: without[view] for view in ('per_group', 'per_repository_and_value')},
+        }
+    return views
