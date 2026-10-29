@@ -380,6 +380,30 @@ def cmd_watch(args) -> int:
         return 0
 
 
+def cmd_darkmatter(args) -> int:
+    from dsbench import darkmatter
+    from dsbench.metrics import rank_sql
+    from dsbench.store import connect
+
+    home = resolve_home(args.home)
+    if args.dm_command == 'import':
+        result = darkmatter.import_verdicts(home, Path(args.csv), args.source, Path(args.units) if args.units else None)
+        print(
+            f"imported {', '.join(f'{v} {n:,}' for v, n in result['imported'].items()) or 'nothing'}; "
+            f"the overlay holds {result['overlay_units']:,} units"
+        )
+        return 0
+    with connect(home) as con:
+        s = darkmatter.export(con, home, args.runs, rank_sql('x.tier'), name=args.name, per_sheet=args.per_sheet)
+    print(
+        f"{s['units']:,} units beyond the labels from {s['findings']:,} findings; per run: "
+        + ', '.join(f'{r} {n:,}' for r, n in s['units_per_run'].items())
+    )
+    print('settled: ' + ', '.join(f'{k} {n:,}' for k, n in sorted(s['settled'].items())))
+    print(f"{s['sheets']} review sheets; written: {s['written_to']}")
+    return 0
+
+
 def cmd_tools(args) -> int:
     from dsbench import thirdparty
 
@@ -535,6 +559,19 @@ def build_parser() -> argparse.ArgumentParser:
     cmp.add_argument('--bootstrap', type=int, default=1000, help='repository-bootstrap samples (default: 1000)')
     cmp.add_argument('--seed', type=int, default=1, help='the bootstrap seed (default: 1)')
     cmp.set_defaults(func=cmd_compare)
+
+    dm = sub.add_parser('darkmatter', help='units beyond the labels: export them for judging, import verdicts')
+    dm_sub = dm.add_subparsers(dest='dm_command', required=True)
+    dm_export = dm_sub.add_parser('export', help='units, evidence, rule verdicts and masked review sheets')
+    dm_export.add_argument('--runs', nargs='+', required=True, metavar='RUN')
+    dm_export.add_argument('--name', help="the export's name in darkmatter/<date>-<name>/")
+    dm_export.add_argument('--per-sheet', type=int, default=100, help='units per review sheet (default: 100)')
+    dm_export.set_defaults(func=cmd_darkmatter)
+    dm_import = dm_sub.add_parser('import', help='merge verdicts into the overlay')
+    dm_import.add_argument('csv', help="an export's rules.csv, or its filled verdicts-template.csv")
+    dm_import.add_argument('--source', required=True, help='who or what gave the verdicts')
+    dm_import.add_argument('--units', help="the export's units.jsonl, to resolve a template's unit ids")
+    dm_import.set_defaults(func=cmd_darkmatter)
 
     tools = sub.add_parser('tools', help='other scanners: fetch the pinned gitleaks and Betterleaks releases')
     tools_sub = tools.add_subparsers(dest='tools_command', required=True)

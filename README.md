@@ -70,6 +70,8 @@ dsbench match --run <run_id> --matcher located --processes 16   # one matcher, i
 dsbench metrics --run <run_id>         # count again: metrics.json and summary.md
 dsbench diagnose --run <run_id>        # why it missed and what it reported, from the scanner's own tracer
 dsbench compare RUN RUN ...            # builds or tools head to head, with bootstrap intervals
+dsbench darkmatter export --runs RUN   # units beyond the labels, evidence, rule verdicts, masked review sheets
+dsbench darkmatter import FILE --source NAME   # verdicts into the overlay
 ```
 
 A run id is `<YYYYMMDD>-<HHMMSS>-<profile>`; `--label` names the build under test in the run's parameters.
@@ -164,6 +166,25 @@ per-(repository, value) view is also counted with it: units judged secrets in ki
 labelled secrets) count as found, units judged not secrets (publishable, placeholders, not secrets) as false
 positives, and recall divides by the labelled secrets plus every judged secret any compared run reports. Comparisons
 are written to `comparisons/<date>-<name>/`, aggregates only.
+
+## Dark matter
+
+Scanners report much the labels never mention. `darkmatter export --runs RUN ...` collects every finding of the runs
+that matches no label into units (one per repository and normalised value, merged where the runs' findings overlap on
+a line) and prepares them for judging, without judging any:
+
+- evidence per unit, gathered offline: the path's class (test, example, docs, vendor, CI, config), the name beside
+  the value, its charset, length and entropy, placeholder words, provider formats with the checks they allow offline
+  (a GitHub token's checksum, a JWT's claims, a private key's DER structure), how many repositories hold the value,
+  the labels in the same file and on the same line, and which runs report it;
+- verdicts for the clear cases, by rule: a value labelled a secret elsewhere and never a look-alike is a copy of a
+  labelled secret, one labelled only a look-alike elsewhere is not a secret, and a file name, path or version is not
+  a secret (`rules.csv`);
+- masked review sheets of every other unit, with the rubric: the value and every other known or random-looking value
+  on its line are replaced by `<charset:length:entropy>`, and a verdicts template to fill.
+
+`darkmatter import FILE --source NAME` merges verdicts, from `rules.csv` or a filled template, into the overlay that
+`compare` reads. Everything stays in the bench home under `darkmatter/<date>-<name>/`.
 
 ## Diagnosis
 

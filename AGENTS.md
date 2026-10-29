@@ -53,7 +53,7 @@ stored findings again (the first `located` match of a dataset reads the whole co
 | `matcher.py` | Pairing findings with labels: `located` (the headline) and `legacy` (the June view); `MATCHER_VERSIONS` |
 | `counting.py` | The `located` pairs per candidate group, per (repository, value) and per row, the reliability of each tier |
 | `compare.py` | Runs head to head: every view and level, repository-bootstrap intervals, the overlay's units beyond the labels |
-| `darkmatter.py` | Units beyond the labels and the overlay of their verdicts (keys only, never a value) |
+| `darkmatter.py` | Units beyond the labels, their offline evidence, rule verdicts, masked review sheets, the overlay of verdicts (keys only, never a value) |
 | `diagnose.py` | Cases for the scanner's tracer, the digest check, the verdict funnel and rule ledger (aggregates only) |
 | `metrics.py` | Every view per confidence level, the June view included; `metrics.json`, `summary.md` |
 | `doctor.py` | Readiness checks |
