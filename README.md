@@ -64,6 +64,7 @@ dsbench run --tool-ref v2.1.1          # a release's committed tree, in a venv f
 dsbench run --sample 3000 --seed 11    # the reference sample: 3,000 labelled files, 1.4 GB
 dsbench run --resume <run_id>          # continue an interrupted run with its own scanner
 dsbench match --run <run_id>           # pair findings with labels again (after a matcher change)
+dsbench match --run <run_id> --matcher located --processes 16   # one matcher, its corpus reads in 16 processes
 dsbench metrics --run <run_id>         # count again: metrics.json and summary.md
 ```
 
@@ -156,8 +157,8 @@ at a leaked credential in a public repository. Without it, `metrics` counts ever
 .venv/bin/black .
 ```
 
-The tests use synthetic data only; one calibration test also reads SecretBench when `DSBENCH_DATA` points at it, and
-skips otherwise. Contributions must keep every secret value out of the repository, its tests and its history.
+The tests use synthetic data only; two calibration tests also read the June table and SecretBench when
+`DSBENCH_HOME` and `DSBENCH_DATA` point at them, and skip otherwise. Contributions must keep every secret value out of the repository, its tests and its history.
 
 ## License
 

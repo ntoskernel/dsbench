@@ -27,13 +27,15 @@ Instructions for AI coding agents working on dsbench, the benchmark harness for 
 
 ```bash
 python -m venv .venv && .venv/bin/pip install --constraint constraints.txt --editable '.[dev]'
-.venv/bin/python -m pytest -q          # the whole suite, about 15 s; two June tests skip without the bench data
+.venv/bin/python -m pytest -q          # the whole suite, about 30 s; two June tests skip without the bench data
 .venv/bin/black .                      # line length 120, quotes kept
 dsbench doctor                         # with DSBENCH_DATA, DSBENCH_HOME, DSBENCH_TOOL_CWD, DSBENCH_CACHE set
 ```
 
-A full SecretBench run is about 10 CPU-hours. Do not start one to check a change that the tests can check; when one is
-needed, run it in the background and follow it with `dsbench watch`.
+A full SecretBench run is about 10 CPU-hours for DeepSecrets 2.2 and several times that for 2.1, whose lexer reads
+every file. Do not start one to check a change that the tests can check; when one is needed, run it in the background
+and follow it with `dsbench watch`. A matcher or metric change needs no scan: `dsbench match --run RUN` pairs the
+stored findings again (the first `located` match of a dataset reads the whole corpus once, about a minute).
 
 ## Layout
 
