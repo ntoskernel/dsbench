@@ -79,9 +79,10 @@ def check_pairs(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str) -> No
 def row_tier(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER) -> Dict[int, int]:
     """Each matched CSV row and the highest tier rank of a finding paired with it."""
     check_pairs(con, run_id, matcher)
+    rank = rank_sql('f.tier')
     return dict(
         con.execute(
-            f'''SELECT m.row_id, max({rank_sql('f.tier')}) FROM matches m
+            f'''SELECT m.row_id, max({rank}) FROM matches m
                JOIN findings f ON f.run_id = m.run_id AND f.finding_id = m.finding_id
                WHERE m.run_id = ? AND m.matcher = ? GROUP BY m.row_id''',
             [run_id, matcher],
