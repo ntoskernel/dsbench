@@ -146,7 +146,9 @@ short value of low entropy) is placeholder wherever it is. A random-looking valu
 development is test_credential, with one exception that follows the dataset: an example in documentation or an API
 specification (a README, docs pages, OpenAPI or Swagger files, SDK samples) in a file whose labels are only N, or that
 has no labels, is placeholder however realistic it looks; in a file with a Y label it is test_credential. Crypto test
-vectors in files labelled only N are not_secret.
+vectors in files labelled only N are not_secret. Data that is not a credential (pagination, continuation or skip
+tokens, cursors, booking or order references, request signatures, public verification keys) is not_secret, in
+examples too.
 
 Keys whose kind the format shows: an extended public key (formats: bip32_public) or a hex public key
 (ec_public_key_hex) is not_secret; an extended private key (bip32_private) is test_credential in tests and examples,
