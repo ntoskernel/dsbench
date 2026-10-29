@@ -122,7 +122,7 @@ def test_files_and_operations(con):
     assert m['operations']['cpu_h'] == 2.0 and m['operations']['wall_s'] == 90.0
     assert m['matching'] == {
         'legacy': {'version': 'legacy-1', 'pairs': 4, 'rows': 4},
-        'located': {'version': 'located-1', 'pairs': 4, 'rows': 4},
+        'located': {'version': 'located-2', 'pairs': 4, 'rows': 4},
     }
 
 

@@ -109,9 +109,9 @@ A run directory holds `shards/sNNNNN/{target/,report.sarif,scanner.log}`, `progr
 the file the scanner read, and a finding is credited for every label its span overlaps, with no fuzzy threshold and no
 line tolerance. A label is found exactly at its labelled start, else on its labelled lines (at another column, without
 a trailing newline or wrapping quotes, with escaped newlines made real, or with whitespace ignored), else on the
-nearest other line; a value in no form in the file falls back to its labelled span, unless the value transcribes
-source syntax (an escaped newline, a leading quote or bracket) that the span does not describe. A finding is found at
-its SARIF region. A real group is found when a finding is paired with one of its real rows. A hard-negative group is
+nearest other line, else by its material on its labelled lines (the characters a key is made of, with escape
+sequences and string syntax ignored, which finds a private key written as string literals); a value in none of those
+forms falls back to its labelled span. A finding is found at its SARIF region. A real group is found when a finding is paired with one of its real rows. A hard-negative group is
 charged when a finding is paired with one of its rows and with no real secret anywhere; a fragment is charged only by
 a finding that does not enclose it. Precision is found real groups over found plus charged; findings outside the
 labels never enter it, and are reported beside it.

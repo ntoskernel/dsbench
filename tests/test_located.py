@@ -48,13 +48,31 @@ def test_a_value_on_other_lines_is_found_nearest_its_label(text):
     assert (s.kind, s.line_delta, text.line_of(s.start)) == ('elsewhere', 7, 10)
 
 
-def test_a_value_not_in_the_file_falls_back_to_its_span_unless_it_is_a_transcription(text):
+def test_a_value_not_in_the_file_falls_back_to_its_span(text):
     s = label(text, 'Qq1Ww2Ee3Rr4', 10, 8)
     assert (s.kind, s.start, s.end) == ('span', text.offset(10, 8), text.offset(10, 20))
-    assert label(text, '"Qq1Ww2Ee3Rr4"', 10, 7).kind == 'none'  # opens with a quote
-    assert label(text, 'BEGIN\\nQq1Ww2Ee3Rr4', 9, 8).kind == 'none'  # an escaped newline
+    # a transcription the file does not hold falls back too (located-1 left these unlocated)
+    assert label(text, '"Qq1Ww2Ee3Rr4"', 10, 7).kind == 'span'
     assert label(text, 'Qq1Ww2Ee3Rr4', 99, 1).kind == 'none'  # its span is not in the file
     assert label(text, '', 1, 1).kind == 'none'
+
+
+def test_a_key_written_as_string_literals_is_located_by_its_material():
+    body = 'Tq7XbR2mKp9LZx9Qm2Lp8Rt4Mk3Vb8Qw1Zr5'
+    source = (
+        'KEY = ("-----BEGIN RSA PRIVATE KEY-----\\n"\n'
+        f'       "{body[:18]}\\n"\n'
+        f'       "{body[18:]}\\n"\n'
+        '       "-----END RSA PRIVATE KEY-----")\n'
+    )
+    t = located.Text(source)
+    # labelled with an extra escaping layer and one literal per line, as some rows are
+    value = f'-----BEGIN RSA PRIVATE KEY-----\\\\n{body}\\\\n-----END RSA PRIVATE KEY-----'
+    s = label(t, value, 1, 8, end_line=4, end_col=37)
+    assert s.kind == 'material' and source[s.start : s.end].startswith('BEGIN') and t.line_of(s.end) == 4
+    assert located.material('ab\\\\nCD+/x"\\n') == ('abCD+/x', [0, 1, 5, 6, 7, 8, 9])
+    # too little material to rely on: the span instead
+    assert label(t, '"\\nQ7Z\\n"', 1, 1).kind == 'span'
 
 
 def test_a_finding_is_located_at_its_region_or_its_snippet_on_those_lines(text):
@@ -107,10 +125,10 @@ def test_match_run_locates_labels_once_and_pairs_overlapping_findings(tmp_path: 
             "SELECT finding_id, row_id, tier, encloses, matcher_version FROM matches WHERE matcher = 'located' ORDER BY 1, 2"
         ).fetchall()
         assert pairs == [
-            (1, 1, 'exact', False, 'located-1'),
-            (1, 2, 'exact', True, 'located-1'),
-            (2, 3, 'exact', False, 'located-1'),
-            (3, 4, 'reformed', False, 'located-1'),
+            (1, 1, 'exact', False, 'located-2'),
+            (1, 2, 'exact', True, 'located-2'),
+            (2, 3, 'exact', False, 'located-2'),
+            (3, 4, 'reformed', False, 'located-2'),
         ]
         # the second time the labels come from the store, and only files with findings are read
         assert matcher.match_run(con, home, 'r', 'located', processes=2)['located']['pairs'] == 4

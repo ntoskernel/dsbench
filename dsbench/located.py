@@ -13,20 +13,26 @@ A label is located by its value, in this order, and the first that succeeds says
                the occurrence nearest the labelled column wins
     reformed   on the labelled lines with whitespace ignored (a key re-indented or re-wrapped, CRLF endings)
     elsewhere  the value, in any of those forms, on other lines of the file; the occurrence nearest the labelled line
-    span       the value is nowhere in the file: the labelled span itself, the dataset's own coordinates
-    none       nowhere in the file, and the value is a source transcription (it holds an escaped newline, or opens
-               with a quote or a bracket) that the labelled span does not describe; or the span is not in the file
+    material   on the labelled lines, its material: the characters `[A-Za-z0-9+/=]` of label and file alike, with
+               escape sequences dropped and an extra escaping layer undone, so quotes, `+` and other string syntax
+               between the pieces do not matter (a private key written as a string literal, or concatenated from one
+               literal per line); at least 16 characters of it
+    span       the value is nowhere in the file in any form: the labelled span itself, the dataset's own coordinates
+    none       the labelled span is not in the file either
 
 A finding is located at its region; when the region does not hold its snippet, at the snippet's occurrence on the
 region's lines nearest the region. A finding and a label pair when their spans overlap, by at least one character.
 
 How labels whose value sits away from their span are handled is a choice of this matcher, made on the data. Of
 SecretBench's 97,479 rows, 96,163 are exact, 376 moved and 681 reformed on their own lines, 49 elsewhere, and 210 are
-in no form in the file: 163 fall back to their span and 47 are transcriptions. Nearly all of the 210 are private keys,
-and for about half of them the file holds a different key at that place. With the span fallback DeepSecrets 2.2.0
-scores 13,489 real groups against the published 13,483; without it 13,442, too few. Leaving the transcribed keys
-at `none` keeps 27 groups uncredited, the keys inside string literals whose labels carry escapes or quotes the finding
-lacks, which the published matcher did not credit either; crediting them is a later version of this matcher."""
+in none of those forms in the file. Nearly all of the 210 are private keys, and for about half of them the file holds
+a different key at that place. Falling back to the span is needed: without it DeepSecrets 2.2.0 scores 13,442 real
+groups against the published 13,483. It also keeps crediting a different key reported at the labelled place.
+
+Versions. `located-1` gave the 47 labels that transcribe source syntax (an escaped newline, a leading quote or bracket)
+neither the material search nor the span, so the keys inside string literals went uncredited (27 groups on 2.2.0,
+13,489 real groups). `located-2` locates them by their material where it is on their lines, and lets every other label
+fall back to its span; on 2.2.0 that credits those 27 groups."""
 
 import bisect
 import re
@@ -34,8 +40,12 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 QUOTES = '"\'`'
-# a label value that copies source syntax: an escaped newline, or a leading quote or bracket
+# a label value that copies source syntax: an escaped newline, or a leading quote or bracket (counted only)
 TRANSCRIBED = re.compile(r'\\n|^["\'\[]')
+MATERIAL = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+MIN_MATERIAL = 16
+# how far around the labelled place the material search reads, beyond the value's own length
+MATERIAL_SLACK = 65_536
 # how far past the labelled lines a value found with whitespace ignored may run, beyond its own length
 REFORM_SLACK = 4096
 # how many occurrences of a value are weighed when picking the nearest
@@ -162,10 +172,48 @@ def locate_label(t: Text, value: str, start_line: int, end_line: int, start_col:
             hit = _nearest(occurrences, by_line)
             if hit:
                 return LabelSpan('elsewhere', *hit, line_delta=t.line_of(hit[0]) - start_line)
+    if value and 1 <= start_line <= t.lines:
+        hit = _locate_material(t, value, start_line, end_line, labelled)
+        if hit:
+            return LabelSpan('material', *hit)
     end = t.offset(end_line, end_col)
-    if value and TRANSCRIBED.search(value) is None and labelled is not None and end is not None and end > labelled:
+    if value and labelled is not None and end is not None and end > labelled:
         return LabelSpan('span', labelled, end)
     return LabelSpan('none')
+
+
+def material(text: str, base: int = 0) -> Tuple[str, List[int]]:
+    """The characters a key is made of, with escape sequences dropped (a run of backslashes counts as one, so a value
+    escaped once more than the file still matches), and each one's offset in the text."""
+    chars, offsets = [], []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            while i < n and text[i] == '\\':
+                i += 1
+            i += 1  # the escaped character
+            continue
+        if c in MATERIAL:
+            chars.append(c)
+            offsets.append(base + i)
+        i += 1
+    return ''.join(chars), offsets
+
+
+def _locate_material(t: Text, value: str, start_line: int, end_line: int, labelled: Optional[int]) -> Optional[Span]:
+    wanted, _ = material(value)
+    if len(wanted) < MIN_MATERIAL:
+        return None
+    lo, hi = t.lines_span(start_line, end_line)
+    anchor = labelled if labelled is not None else lo
+    lo = max(lo, anchor - MATERIAL_SLACK)
+    reach = min(len(t.text), max(hi, anchor) + 2 * len(value) + MATERIAL_SLACK)
+    found, offsets = material(t.text[lo:reach], lo)
+    at = found.find(wanted)
+    if at == -1 or offsets[at] >= hi:
+        return None
+    return offsets[at], offsets[at + len(wanted) - 1] + 1
 
 
 def locate_finding(

@@ -35,7 +35,7 @@ from dsbench.home import BenchHome
 from dsbench.located import match_file
 from dsbench.store import bulk_insert, get_run
 
-MATCHER_VERSIONS = {'legacy': 'legacy-1', 'located': 'located-1'}
+MATCHER_VERSIONS = {'legacy': 'legacy-1', 'located': 'located-2'}
 MATCHERS = tuple(MATCHER_VERSIONS)
 FUZZY_MIN = 90
 _LEGACY_DROP = str.maketrans('', '', ' \n.\\"\'-/+')
