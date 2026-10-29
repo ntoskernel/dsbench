@@ -197,6 +197,7 @@ def _operations(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
     wall_s = sum(s.get('wall_s', 0) for s in params.get('segments', []))
     return {
         'cores': params.get('cores'),
+        'resumed_cores': [r.get('cores') for r in params.get('resumed_with', [])],
         'shards': {'total': shards[0], 'done': shards[1], 'split': shards[2], 'failed': shards[3], 'solo': shards[4]},
         'wall_s': round(wall_s, 1),
         'cpu_s': round(shards[5] or 0, 1),
@@ -363,9 +364,14 @@ def summary_markdown(m: Dict) -> str:
         f"{files['artifacts']:,} of {files['to_scan']:,} files have an artifact: "
         + ', '.join(f'{n:,} `{s}`' for s, n in files['status'].items())
         + '.',
-        f"Size tier ({files['depth']['tier_bytes']:,} bytes): {files['depth']['over_tier_shallow']:,} of "
-        f"{files['depth']['over_tier']:,} larger files `shallow`, {files['depth']['within_tier_deep']:,} of "
-        f"{files['depth']['within_tier']:,} others `deep`. Error notifications: {files['error_notifications']:,}.",
+        (
+            'The scanner reports no depth: it has no size tier.'
+            if files['depth']['no_depth'] == files['artifacts']
+            else f"Size tier ({files['depth']['tier_bytes']:,} bytes): {files['depth']['over_tier_shallow']:,} of "
+            f"{files['depth']['over_tier']:,} larger files `shallow`, {files['depth']['within_tier_deep']:,} of "
+            f"{files['depth']['within_tier']:,} others `deep`."
+        )
+        + f" Error notifications: {files['error_notifications']:,}.",
         '',
         '## Per candidate group (`located` matcher)',
         '',
@@ -432,7 +438,9 @@ def _operations_lines(ops: Dict) -> List[str]:
         '## Operations',
         '',
         f"{shards['total']:,} shards ({shards['done']:,} done, {shards['solo']:,} of them single-file, "
-        f"{shards['split']:,} split, {shards['failed']:,} failed) at `--cores {ops['cores']}`; "
+        f"{shards['split']:,} split, {shards['failed']:,} failed) at `--cores {ops['cores']}`"
+        + (f" (resumed at {', '.join(map(str, ops['resumed_cores']))})" if ops.get('resumed_cores') else '')
+        + '; '
         f"wall {ops['wall_s'] / 60:,.1f} min over {ops['segments']} segment(s), scanner CPU {ops['cpu_h']:,.2f} h, "
         f"largest process {ops['max_rss_mb']:,.0f} MB, longest shard {ops['longest_shard_s'] / 60:,.1f} min. "
         'CPU is comparable only between runs on one machine with the same `--cores` and a quiet host.',

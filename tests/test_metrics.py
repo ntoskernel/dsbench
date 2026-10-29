@@ -199,3 +199,12 @@ def test_a_sample_run_counts_only_the_labels_of_its_files(con):
     assert (low['secrets'], low['secrets_found'], low['lookalikes'], low['lookalikes_found']) == (1, 1, 2, 1)
     assert m['june_way'] is None and m['scope']['files'] == 1 and m['files']['to_scan'] == 1
     assert 'Not applicable: a sample run' in metrics.summary_markdown(m)
+
+
+def test_the_summary_says_when_the_scanner_has_no_size_tier_and_when_a_run_was_resumed(con):
+    con.execute('UPDATE artifacts SET depth = NULL')
+    params = {'cores': 30, 'segments': [{'wall_s': 60.0}] * 3, 'resumed_with': [{'cores': 30}, {'cores': 12}]}
+    con.execute("UPDATE runs SET params = ? WHERE run_id = 'r'", [json.dumps(params)])
+    summary = metrics.summary_markdown(metrics.compute(con, 'r', rows=ROWS))
+    assert 'The scanner reports no depth: it has no size tier.' in summary
+    assert 'at `--cores 30` (resumed at 30, 12); wall 3.0 min over 3 segment(s)' in summary

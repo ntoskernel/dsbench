@@ -15,7 +15,7 @@ own scanner (refusing one whose source digest changed). `progress.json` in the r
 A run scans every file of the dataset unless it is narrowed. `--labelled-only` leaves out the files without a label.
 `--sample N --seed S` scans N labelled files drawn as `random.Random(S).sample(sorted(labelled file ids), N)`: with
 N 3,000 and S 11 that is the sample DeepSecrets 2.2's changes were first measured on (1,405 MB, 809 real candidate
-groups on SecretBench). The run records the rule, the seed and a digest of the drawn ids, and metrics count only the
+groups on SecretBench; v2.1.1 finds 748 of them with 257 look-alike groups charged, the recorded 92.46% and 74.43%). The run records the rule, the seed and a digest of the drawn ids, and metrics count only the
 labels of the files it scanned."""
 
 import hashlib
