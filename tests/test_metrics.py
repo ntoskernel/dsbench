@@ -46,8 +46,8 @@ def con(home: BenchHome):
             )
         for row_id, repo, file_id, line, value, label in LABELS:
             con.execute(
-                'INSERT INTO labels (dataset_id, row_id, repo, file_id, start_line, value, label) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                ['d', row_id, repo, file_id, line, value, label],
+                'INSERT INTO labels (dataset_id, row_id, repo, file_id, start_line, value, label, group_id, fragment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, false)',
+                ['d', row_id, repo, file_id, line, value, label, row_id],
             )
         params = {'cores': 2, 'segments': [{'wall_s': 90.0}], 'label': None}
         con.execute(
@@ -68,6 +68,12 @@ def con(home: BenchHome):
             "INSERT INTO shards (run_id, shard_id, n_files, status, cpu_s, wall_s) VALUES ('r', 's00001', 4, 'done', 7200, 60)"
         )
         matcher.match_run(con, home, 'r', ('legacy',))
+        # the located pairs of this tiny corpus are the legacy ones
+        con.execute(
+            "INSERT INTO matches (run_id, matcher, matcher_version, finding_id, row_id, tier, encloses) "
+            "SELECT run_id, 'located', ?, finding_id, row_id, 'exact', false FROM matches WHERE matcher = 'legacy'",
+            [matcher.MATCHER_VERSIONS['located']],
+        )
         yield con
 
 
@@ -114,11 +120,26 @@ def test_files_and_operations(con):
     assert m['files']['depth']['over_tier'] == m['files']['depth']['over_tier_shallow'] == 1
     assert m['files']['depth']['within_tier'] == m['files']['depth']['within_tier_deep'] == 3
     assert m['operations']['cpu_h'] == 2.0 and m['operations']['wall_s'] == 90.0
-    assert m['matching'] == {'matcher': 'legacy', 'version': 'legacy-1', 'pairs': 4, 'rows': 4}
+    assert m['matching'] == {
+        'legacy': {'version': 'legacy-1', 'pairs': 4, 'rows': 4},
+        'located': {'version': 'located-1', 'pairs': 4, 'rows': 4},
+    }
+
+
+def test_the_located_headline_counts_groups_units_and_rows(con):
+    loc = metrics.compute(con, 'r', rows=ROWS)['located']
+    low = loc['per_group']['low']
+    # groups are rows here: 4 real (rows 1, 2, 3, 6), 3 look-alikes; row 7's finding is a look-alike's only
+    assert (low['secrets'], low['secrets_found'], low['lookalikes'], low['lookalikes_found']) == (4, 2, 3, 2)
+    unit = loc['per_repository_and_value']['low']
+    # rows 1 and 2 are one real unit; row 7 shares row 3's value in repo-b, so its unit is real, not a look-alike
+    assert (unit['secrets'], unit['secrets_found'], unit['lookalikes'], unit['lookalikes_found']) == (3, 2, 2, 1)
+    assert loc['per_row']['very-high']['secrets_found'] == 1 and loc['reliability']['medium']['real_groups'] == 1
+    assert loc['extras']['low'] == {'in_labelled_files': 0, 'in_unlabelled_files': 1}
 
 
 def test_pairs_from_another_matcher_version_are_refused(con):
-    con.execute("UPDATE matches SET matcher_version = 'legacy-0'")
+    con.execute("UPDATE matches SET matcher_version = 'legacy-0' WHERE matcher = 'legacy'")
     with pytest.raises(metrics.MetricsError):
         metrics.compute(con, 'r', rows=ROWS)
     con.execute('DELETE FROM matches')
@@ -141,7 +162,8 @@ def test_the_written_reports_hold_aggregates_only(con, home: BenchHome, monkeypa
         assert value not in written
     assert json.loads((home.run_dir('r') / 'metrics.json').read_text())['june_way'] == m['june_way']
     summary = (home.run_dir('r') / 'summary.md').read_text()
-    assert '| low | 66.67% | 50.00% |' in summary and '## Per repository and value' in summary
+    assert '| low | 66.67% | 50.00% |' in summary and '## The June way per (repository, value)' in summary
+    assert '## Per candidate group (`located` matcher)' in summary and '## Reliability of each tier' in summary
 
 
 SECRETBENCH_CSV = Path(os.environ.get('DSBENCH_DATA', '/nonexistent')) / 'secretbench.csv'

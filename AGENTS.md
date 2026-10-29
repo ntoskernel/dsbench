@@ -14,8 +14,10 @@ Instructions for AI coding agents working on dsbench, the benchmark harness for 
    `summary.md`, `metrics.json` and terminal output carry aggregates and never a value or a file name. Do not print a value from the bench home, even while debugging.
 3. **Three places, kept apart.** The datasets and the bench home, the tool checkout and its cache, and this checkout
    (`dsbench/places.py`). Do not relax the overlap checks.
-4. **Counting changes are versioned.** A change to what the `legacy` matcher accepts bumps `MATCHER_VERSIONS`
-   (`dsbench/matcher.py`); metrics refuse pairs of another version. The June view must keep reproducing June's own
+4. **Counting changes are versioned.** A change to what the `located` or `legacy` matcher accepts bumps its entry in
+   `MATCHER_VERSIONS` (`dsbench/matcher.py`); metrics refuse pairs of another version, and a new `located` version
+   locates the labels again. A change to the grouping or the fragment rule bumps `LABEL_POLICY_VERSION`
+   (`dsbench/dataset.py`), which rebuilds a prepared dataset. The June view must keep reproducing June's own
    figures (`tests/test_june.py`) and June's per-(repository, value) recall of 93.10% (`tests/test_metrics.py`); both
    run when `DSBENCH_HOME` holds the June table and `DSBENCH_DATA` holds SecretBench, and skip otherwise.
 5. **Quoted numbers come from the `all-files` profile.** It is the default; `scanner-defaults` measures a scope, not
@@ -40,12 +42,14 @@ needed, run it in the background and follow it with `dsbench watch`.
 | `cli.py` | The command line; opens the store only in the commands that need it |
 | `places.py`, `home.py` | The places and their separation; the bench home's layout |
 | `store.py` | The DuckDB store (`bench.duckdb` in the bench home) and its bulk inserts |
-| `dataset.py` | `prepare`: the CSV and the corpus listing into the store, and the scanner's view of the corpus |
-| `tool.py` | The scanner as a subprocess: command, profiles, version, commit, source digest, release trees |
+| `dataset.py` | `prepare`: the CSV and the corpus listing into the store, the scanner's view of the corpus, candidate groups and fragments |
+| `tool.py` | The scanner as a subprocess: command, profiles, version, commit, source digest, release trees and their venvs |
 | `runner.py` | `run`: shards, the scheduler, timeouts and splits, ingestion, `--resume`, `progress.json` |
 | `sarif.py` | Reading the scanner's SARIF report |
-| `matcher.py` | Pairing findings with labels (`legacy`) |
-| `metrics.py` | The June view and the per-(repository, value) view per confidence level; `metrics.json`, `summary.md` |
+| `located.py` | Where a label and a finding sit in the text the scanner read; one file's pairs, in a worker process |
+| `matcher.py` | Pairing findings with labels: `located` (the headline) and `legacy` (the June view); `MATCHER_VERSIONS` |
+| `counting.py` | The `located` pairs per candidate group, per (repository, value) and per row, the reliability of each tier |
+| `metrics.py` | Every view per confidence level, the June view included; `metrics.json`, `summary.md` |
 | `doctor.py` | Readiness checks |
 | `legacy/` | The June 2026 evaluation: reading its PostgreSQL dump (`pgcopy.py`, `preserve.py`) and the values-free table it leaves in the bench home (`june.py`) |
 

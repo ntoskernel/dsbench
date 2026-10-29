@@ -1,4 +1,7 @@
-"""`metrics`: a run counted the June way, at each confidence level, into `metrics.json` and `summary.md`.
+"""`metrics`: a run counted at each confidence level, into `metrics.json` and `summary.md`.
+
+The headline is the `located` matcher's: per candidate group, per (repository, value) and per row, with the
+reliability of each tier and the findings outside the labels (`counting.py`). Beside it, the June way.
 
 The June view (`legacy/june.py`) takes June's own labelled rows (no extras, no row with a manual `problem` flag: 14,847
 secrets and 82,265 look-alikes) and asks of each whether the run found it. Here a row is found at a level when one of
@@ -21,16 +24,14 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import duckdb
 
+from dsbench import counting
+from dsbench.counting import LEVELS, TIER_RANK
 from dsbench.home import BenchHome
 from dsbench.legacy import june
 from dsbench.matcher import MATCHER_VERSIONS
 from dsbench.runner import DEEP_MAX_SIZE, fill_tiers
 from dsbench.sarif import TIERS
 from dsbench.store import fetch_dicts, get_run
-
-# the named levels, lowest first; a finding is in a level when its tier ranks at least as high
-LEVELS = ('low', 'medium', 'high', 'very-high')
-TIER_RANK = {tier: rank for rank, tier in enumerate(TIERS)}
 
 
 def rank_sql(column: str) -> str:
@@ -58,8 +59,8 @@ def check_tiers(con: duckdb.DuckDBPyConnection, run_id: str) -> None:
         )
 
 
-def row_tier(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER) -> Dict[int, int]:
-    """Each matched CSV row and the highest tier rank of a finding paired with it."""
+def check_pairs(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str) -> None:
+    """Refuses pairs of another matcher version, and a run with findings but no pairs of this matcher."""
     versions = {
         v
         for (v,) in con.execute(
@@ -73,6 +74,11 @@ def row_tier(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER
         )
     if not versions and con.execute('SELECT count(*) FROM findings WHERE run_id = ?', [run_id]).fetchone()[0]:
         raise MetricsError(f'{run_id} has findings but no {matcher} pairs: run `dsbench match --run {run_id}`')
+
+
+def row_tier(con: duckdb.DuckDBPyConnection, run_id: str, matcher: str = MATCHER) -> Dict[int, int]:
+    """Each matched CSV row and the highest tier rank of a finding paired with it."""
+    check_pairs(con, run_id, matcher)
     return dict(
         con.execute(
             f'''SELECT m.row_id, max({rank_sql('f.tier')}) FROM matches m
@@ -198,6 +204,34 @@ def _operations(con: duckdb.DuckDBPyConnection, run: Dict) -> Dict:
     }
 
 
+def run_scope(con: duckdb.DuckDBPyConnection, run: Dict) -> Optional[set]:
+    """The files a sample run scanned; None for a run of the whole dataset."""
+    if not run['params'].get('sample'):
+        return None
+    return {
+        f
+        for (f,) in con.execute('SELECT DISTINCT file_id FROM shard_files WHERE run_id = ?', [run['run_id']]).fetchall()
+    }
+
+
+def located_view(con: duckdb.DuckDBPyConnection, run: Dict, scope: Optional[set]) -> Dict:
+    check_pairs(con, run['run_id'], 'located')
+    labels = counting.load_labels(con, run['dataset_id'], scope)
+    kinds = dict(
+        con.execute(
+            'SELECT kind, count(*) FROM label_spans WHERE dataset_id = ? GROUP BY 1 ORDER BY 2 DESC',
+            [run['dataset_id']],
+        ).fetchall()
+    )
+    return {
+        'matcher': 'located',
+        'version': MATCHER_VERSIONS['located'],
+        'labels_located': kinds,
+        **counting.count(labels, counting.located_pairs(con, run['run_id'], rank_sql('f.tier'))),
+        'extras': counting.extras(con, run, rank_sql('x.tier'), scope),
+    }
+
+
 def compute(
     con: duckdb.DuckDBPyConnection,
     run_id: str,
@@ -205,6 +239,9 @@ def compute(
     legacy_dir: Optional[Path] = None,
 ) -> Dict:
     run = get_run(con, run_id)
+    check_tiers(con, run_id)
+    scope = run_scope(con, run)
+    headline = located_view(con, run, scope)
     june_table = True
     if rows is None:
         try:
@@ -212,7 +249,6 @@ def compute(
         except FileNotFoundError:
             # no `preserve` export in this bench home: everything but the June view is still counted
             rows, june_table = [], False
-    check_tiers(con, run_id)
     best = row_tier(con, run_id)
     label_of = {
         r['row_id']: (r['repo'], r['value'])
@@ -222,7 +258,7 @@ def compute(
     missing = sum(i not in label_of for i in ids)
     june_way: Optional[Dict] = {}
     per_unit: Optional[Dict] = {}
-    if missing or not june_table:
+    if missing or not june_table or scope is not None:
         # no June table, or not June's corpus: the June view would count a different set of rows
         june_way = per_unit = None
     else:
@@ -231,9 +267,12 @@ def compute(
             june_way[level] = june.view(rows, found=found)
             per_unit[level] = unit_view(rows, label_of, found)
     dataset = con.execute('SELECT stats FROM datasets WHERE dataset_id = ?', [run['dataset_id']]).fetchone()
-    pairs = con.execute(
-        'SELECT count(*), count(DISTINCT row_id) FROM matches WHERE run_id = ? AND matcher = ?', [run_id, MATCHER]
-    ).fetchone()
+    matching = {}
+    for matcher in MATCHER_VERSIONS:
+        pairs = con.execute(
+            'SELECT count(*), count(DISTINCT row_id) FROM matches WHERE run_id = ? AND matcher = ?', [run_id, matcher]
+        ).fetchone()
+        matching[matcher] = {'version': MATCHER_VERSIONS[matcher], 'pairs': pairs[0], 'rows': pairs[1]}
     return {
         'computed_at': datetime.now().isoformat(timespec='seconds'),
         'run': {
@@ -253,10 +292,12 @@ def compute(
             'finished_at': str(run['finished_at']),
         },
         'dataset': json.loads(dataset[0]) if dataset else None,
+        'scope': {'sample': run['params'].get('sample'), 'files': len(scope) if scope is not None else None},
         'files': _files(con, run),
         'findings': _findings(con, run),
-        'matching': {'matcher': MATCHER, 'version': MATCHER_VERSIONS[MATCHER], 'pairs': pairs[0], 'rows': pairs[1]},
+        'matching': matching,
         'levels': {'named': list(LEVELS), 'cut': 'by the scanner\'s own tier of each finding'},
+        'located': headline,
         'june_table': june_table,
         'june_rows_missing': missing,
         'june_way': june_way,
@@ -269,9 +310,26 @@ def _pct(value: float) -> str:
     return f'{value:.2%}'
 
 
+def _scores_table(view: Dict, findings: Optional[Dict] = None, fpr: bool = True) -> List[str]:
+    head = '| Level | Recall | Precision | F1 |' + (' FPR |' if fpr else '') + ' Secrets found | Look-alikes charged |'
+    rule = '| --- | ---: | ---: | ---: |' + (' ---: |' if fpr else '') + ' ---: | ---: |'
+    if findings:
+        head, rule = head + ' Findings |', rule + ' ---: |'
+    lines = [head, rule]
+    for level, v in view.items():
+        lines.append(
+            f"| {level} | {_pct(v['recall'])} | {_pct(v['precision'])} | {_pct(v['f1'])} |"
+            + (f" {_pct(v['fpr'])} |" if fpr else '')
+            + f" {v['secrets_found']:,} of {v['secrets']:,} | {v['lookalikes_found']:,} of {v['lookalikes']:,} |"
+            + (f' {findings[level]:,} |' if findings else '')
+        )
+    return lines + ['']
+
+
 def summary_markdown(m: Dict) -> str:
-    run, files, ops = m['run'], m['files'], m['operations']
+    run, files, ops, loc = m['run'], m['files'], m['operations'], m['located']
     tool = run['tool']
+    scope = m.get('scope') or {}
     lines = [
         f"# {run['run_id']}",
         '',
@@ -279,8 +337,14 @@ def summary_markdown(m: Dict) -> str:
         + (f" (ref `{tool['ref']}`)" if tool['ref'] else '')
         + f", source digest `{(tool['digest'] or '')[:12]}`",
         f"- Profile: `{run['profile']}`" + (f"; label: {run['label']}" if run['label'] else ''),
-        f"- Dataset: `{run['dataset_id']}`; run status `{run['status']}`",
-        f"- Matcher: `{m['matching']['matcher']}` version `{m['matching']['version']}`",
+        f"- Dataset: `{run['dataset_id']}`; run status `{run['status']}`"
+        + (
+            f"; a sample of {scope['files']:,} files (`--sample {scope['sample']['n']} --seed {scope['sample']['seed']}`)"
+            if scope.get('sample')
+            else ''
+        ),
+        '- Matchers: ' + ', '.join(f"`{k}` version `{v['version']}`" for k, v in m['matching'].items()),
+        '- Levels: each finding counted at its own tier as the scanner reports it (rule id suffix, else rule descriptor)',
         '',
         '## Files',
         '',
@@ -291,39 +355,50 @@ def summary_markdown(m: Dict) -> str:
         f"{files['depth']['over_tier']:,} larger files `shallow`, {files['depth']['within_tier_deep']:,} of "
         f"{files['depth']['within_tier']:,} others `deep`. Error notifications: {files['error_notifications']:,}.",
         '',
+        '## Per candidate group (`located` matcher)',
+        '',
+        *_scores_table(loc['per_group'], m['findings']['by_level']),
+        '## Per (repository, value) (`located` matcher)',
+        '',
+        *_scores_table(loc['per_repository_and_value'], fpr=False),
+        '## Per labelled row (`located` matcher, every row)',
+        '',
+        *_scores_table(loc['per_row']),
+        '## Reliability of each tier (candidate groups, at the best tier that found or charged them)',
+        '',
+        '| Tier | Real | Look-alikes | Share real |',
+        '| --- | ---: | ---: | ---: |',
+        *(
+            f"| {tier} | {v['real_groups']:,} | {v['lookalike_groups']:,} | {_pct(v['secret_share'])} |"
+            for tier, v in loc['reliability'].items()
+        ),
+        '',
+        'Findings outside the labels: '
+        + ', '.join(
+            f"{level} {v['in_labelled_files'] + v['in_unlabelled_files']:,} "
+            f"({v['in_unlabelled_files']:,} in unlabelled files)"
+            for level, v in loc['extras'].items()
+        )
+        + '. Labels located: '
+        + ', '.join(f'{k} {n:,}' for k, n in loc['labels_located'].items())
+        + '.',
+        '',
         '## The June way (per labelled row, `legacy` matcher)',
         '',
     ]
     if m['june_way'] is None:
-        if not m.get('june_table', True):
+        if scope.get('sample'):
+            why = 'a sample run, while the June view counts every June row.'
+        elif not m.get('june_table', True):
             why = 'no June table in this bench home (`dsbench preserve --from-dump DUMP` writes it).'
         else:
             why = f"{m['june_rows_missing']:,} CSV ids of June's rows are not labels of this dataset."
         lines += [f'Not applicable: {why}', '']
         return '\n'.join(lines + _operations_lines(ops))
-    lines += [
-        '| Level | Recall | Precision | F1 | FPR | Secrets found | Look-alikes charged | Findings |',
-        '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
-    ]
-    for level, v in m['june_way'].items():
-        lines.append(
-            f"| {level} | {_pct(v['recall'])} | {_pct(v['precision'])} | {_pct(v['f1'])} | {_pct(v['fpr'])} "
-            f"| {v['secrets_found']:,} of {v['secrets']:,} | {v['lookalikes_found']:,} of {v['lookalikes']:,} "
-            f"| {m['findings']['by_level'][level]:,} |"
-        )
-    lines += [
-        '',
-        '## Per repository and value (the same rows)',
-        '',
-        '| Level | Recall | Precision | F1 | Secrets found | Look-alikes charged |',
-        '| --- | ---: | ---: | ---: | ---: | ---: |',
-    ]
-    for level, v in m['per_repository_and_value'].items():
-        lines.append(
-            f"| {level} | {_pct(v['recall'])} | {_pct(v['precision'])} | {_pct(v['f1'])} "
-            f"| {v['secrets_found']:,} of {v['secrets']:,} | {v['lookalikes_found']:,} of {v['lookalikes']:,} |"
-        )
-    return '\n'.join(lines + [''] + _operations_lines(ops))
+    lines += _scores_table(m['june_way'], m['findings']['by_level'])
+    lines += ['## The June way per (repository, value) (the same rows)', '']
+    lines += _scores_table(m['per_repository_and_value'], fpr=False)
+    return '\n'.join(lines + _operations_lines(ops))
 
 
 def _operations_lines(ops: Dict) -> List[str]:

@@ -97,6 +97,22 @@ A run directory holds `shards/sNNNNN/{target/,report.sarif,scanner.log}`, `progr
 
 ## How findings are counted
 
+**The headline: `located`, per candidate group.** The labelled value and the finding are both located in the text of
+the file the scanner read, and a finding is credited for every label its span overlaps, with no fuzzy threshold and no
+line tolerance. A label is found exactly at its labelled start, else on its labelled lines (at another column, without
+a trailing newline or wrapping quotes, with escaped newlines made real, or with whitespace ignored), else on the
+nearest other line; a value in no form in the file falls back to its labelled span, unless the value transcribes
+source syntax (an escaped newline, a leading quote or bracket) that the span does not describe. A finding is found at
+its SARIF region. A real group is found when a finding is paired with one of its real rows. A hard-negative group is
+charged when a finding is paired with one of its rows and with no real secret anywhere; a fragment is charged only by
+a finding that does not enclose it. Precision is found real groups over found plus charged; findings outside the
+labels never enter it, and are reported beside it.
+
+Beside the headline, the same pairs **per (repository, value)**: one unit per repository and value, normalised so
+that the forms one secret is written in (re-wrapped, quoted, escaped) are one unit, real when any of its rows is, and
+found or charged through its rows' groups; and **per row**, every CSV row as given. The reliability table gives, per
+tier, the found real groups and charged look-alike groups whose best finding has that tier.
+
 **The June view.** In June 2026 DeepSecrets' maintainers evaluated the scanner against SecretBench and published the
 figures in its README. dsbench reproduces that counting: per labelled row, without the 233 rows they flagged as wrong,
 which leaves 14,847 secrets and 82,265 look-alikes. A row is found when a finding matches it under the `legacy` matcher:
@@ -107,7 +123,7 @@ outside the labels never enter it.
 Beside it, the same rows per (repository, value): one unit per repository, label and raw value, so copies of one
 secret in many files count once.
 
-Both are reported at each confidence level the scanner offers (`low`, `medium`, `high`, `very-high`), cutting one
+Every view is reported at each confidence level the scanner offers (`low`, `medium`, `high`, `very-high`), cutting one
 `low` run by each finding's tier as the scanner itself reports it: the suffix of its rule id (`-LOW` to `-VERY-HIGH`;
 `-INFO` marks a rejected candidate, in no named level), else, for a rule of fixed confidence, the `precision` of its
 rule descriptor. A level therefore holds what that scanner version reports at that level, wherever its tiers start;

@@ -200,13 +200,22 @@ def _analyze(con, home, run_id: str, matchers=None, processes: Optional[int] = N
 
 
 def _print_metrics(m: dict, run_dir: Path) -> None:
-    files = m['files']
+    files, loc = m['files'], m['located']
     print(
         f"files: {files['artifacts']:,} of {files['to_scan']:,}; "
         + ', '.join(f'{s} {n:,}' for s, n in files['status'].items())
     )
+    print('located, per candidate group, then per (repository, value):')
+    for level in loc['per_group']:
+        g, u = loc['per_group'][level], loc['per_repository_and_value'][level]
+        print(
+            f"  {level:<9} recall {_percent(g['recall'])} ({g['secrets_found']:,}), precision {_percent(g['precision'])} "
+            f"({g['lookalikes_found']:,} charged), F1 {_percent(g['f1'])} | "
+            f"recall {_percent(u['recall'])} ({u['secrets_found']:,}), precision {_percent(u['precision'])}"
+        )
     if m['june_way'] is None:
-        print(f"June view: not applicable, {m['june_rows_missing']:,} CSV ids of June's rows are not labels here")
+        why = 'a sample run' if (m.get('scope') or {}).get('sample') else "June's rows are not this dataset's labels"
+        print(f'June view: not applicable, {why}')
         print(f'written: {run_dir / "metrics.json"}, {run_dir / "summary.md"}')
         return
     print('June way, then per (repository, value):')
