@@ -76,6 +76,51 @@ dsbench darkmatter import FILE --source NAME   # verdicts into the overlay
 
 A run id is `<YYYYMMDD>-<HHMMSS>-<profile>`; `--label` names the build under test in the run's parameters.
 
+## Reproducing a DeepSecrets release's figures
+
+DeepSecrets' release notes and README quote figures measured with dsbench, so anyone with SecretBench can check them.
+What each needs:
+
+| Figure | Needs | Where it is |
+| --- | --- | --- |
+| Recall, precision and F1 per labelled row, per candidate group and per (repository, value), at every confidence level | SecretBench | a run's `summary.md` and `metrics.json`; `compare` side by side |
+| The same for gitleaks and Betterleaks | SecretBench and `dsbench tools fetch` | `run --tool gitleaks`, `run --tool betterleaks`, then `compare` |
+| Performance | the reference sample and one machine | `run --sample 3000 --seed 11 --cores 16`, builds interleaved; scanner CPU in `summary.md` |
+| The June way (per labelled row, June's set of rows) | the June 2026 table ([below](#the-june-2026-table)), not published | `summary.md`, "The June way" |
+| With the judged dark matter | the overlay `overlays/dark_matter_labels.csv` ([Dark matter](#dark-matter)), not published | `compare`, "with the judged dark matter" |
+
+The recipe the 2.3.0 figures came from, in a DeepSecrets checkout that holds the release tags:
+
+```bash
+dsbench prepare
+dsbench run --tool-ref v2.3.0 --cores 28
+dsbench run --tool-ref v2.2.0 --cores 28
+dsbench tools fetch
+dsbench run --tool gitleaks --cores 16
+dsbench run --tool betterleaks --cores 16
+dsbench compare <v2.2.0 run> <v2.3.0 run> <gitleaks run> <Betterleaks run>
+```
+
+Repeated runs of one build give the same findings (the interleaved sample runs of 2.2.0 and 2.3.0 did); `--cores` sets
+how long a run takes. Check two things before comparing numbers:
+
+- **The same corpus.** `dsbench status` names the dataset by a digest of the CSV and the corpus listing; the figures
+  below are for `secretbench-aa06ea5d7c3f` (97,479 rows, 56,633 files).
+- **A complete run.** `summary.md` says `0 failed`: a file that timed out twice was not scanned, and its secrets count
+  as missed. Raise `--solo-timeout` on a slow machine.
+
+What the runs gave, per labelled row at `low`, matcher `located-2` (all 15,086 secrets and 82,393 look-alikes):
+
+| Tool | Secrets found | Look-alikes reported | Recall | Precision |
+| --- | ---: | ---: | ---: | ---: |
+| DeepSecrets 2.3.0 | 14,039 | 1,314 | 93.06% | 91.44% |
+| DeepSecrets 2.2.0 | 13,992 | 2,245 | 92.75% | 86.17% |
+| gitleaks 8.30.1 | 12,861 | 5,631 | 85.25% | 69.55% |
+| Betterleaks 1.8.1 | 12,863 | 8,251 | 85.26% | 60.92% |
+
+The 2.3.0 row was measured on its release candidate `f3f7ed3`; the commits after it change the version and the
+packaging metadata, not the scanner.
+
 ## What a run does
 
 `prepare` loads the CSV as given: problems in a row become recorded issues, never corrections. The scanner sees each
