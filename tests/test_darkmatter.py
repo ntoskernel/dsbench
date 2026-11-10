@@ -32,7 +32,7 @@ ROWS = [
 FINDINGS = {
     'a': [(1, 1, 10, 22, 'Tq7XbR2mKp9L'), (2, 2, 9, 21, 'Tq7XbR2mKp9L'), (3, 3, 11, 22, 'hello-world'), (4, 4, 12, 17, '1.2.3'), (5, 5, 12, 34, RANDOM)],
     # another tool reports the assignment around the same value: one unit with run a's
-    'b': [(1, 5, 1, 35, f'api_key = "{RANDOM}"')],
+    'b': [(1, 5, 1, 35, f'api_key = "{RANDOM}"'), (2, 2, 1, 22, 'copy = "Tq7XbR2mKp9L"')],
 }  # fmt: skip
 
 
@@ -58,7 +58,7 @@ def con(tmp_path: Path, home: BenchHome):
 
 def test_export_settles_the_clear_cases_and_masks_the_rest(con, home: BenchHome):
     s = darkmatter.export(con, home, ['a', 'b'], rank_sql('x.tier'), name='t', per_sheet=10)
-    assert s['units'] == 4 and s['units_per_run'] == {'a': 4, 'b': 1}
+    assert s['units'] == 4 and s['units_per_run'] == {'a': 4, 'b': 2}
     assert s['settled'] == {
         'rule:labelled_y_elsewhere': 1,
         'rule:labelled_n_elsewhere': 1,
@@ -98,6 +98,18 @@ def test_rule_verdicts_and_judged_units_go_into_the_overlay(con, home: BenchHome
         f.write('unit_id,verdict,note\nu000000,maybe,\n')
     with pytest.raises(darkmatter.DarkMatterError):
         darkmatter.import_verdicts(home, template, 'x', out / 'units.jsonl')
+
+
+def test_a_rule_verdict_covers_every_key_of_its_unit(con, home: BenchHome):
+    # run b's assignment around the copy merges into the copy's unit with a key of its own
+    s = darkmatter.export(con, home, ['a', 'b'], rank_sql('x.tier'), name='t')
+    out = Path(s['written_to'])
+    settled = [json.loads(line) for line in (out / 'units.jsonl').read_text().splitlines()]
+    copy = next(u for u in settled if u.get('verdict_source') == 'rule:labelled_y_elsewhere')
+    assert len(copy['keys']) == 2
+    darkmatter.import_verdicts(home, out / 'rules.csv', 'rules')
+    overlay = darkmatter.load_overlay(home)
+    assert all(overlay.get(tuple(k)) == 'copy_of_labelled' for k in copy['keys'])
 
 
 def _github_token(body: str) -> str:

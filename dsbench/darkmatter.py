@@ -503,8 +503,10 @@ def export(
         elif settled:
             evidence['verdict'], evidence['verdict_source'] = settled[0], f'rule:{settled[1]}'
             tally[f'rule:{settled[1]}'] += 1
-            rules_rows.append(
-                {'repo': key[0], 'value_sha256': key[1], 'verdict': settled[0], 'source': f'rule:{settled[1]}'}
+            # every key of the unit: another tool's report merged into it is a key of its own in the overlay
+            rules_rows.extend(
+                {'repo': repo, 'value_sha256': sha, 'verdict': settled[0], 'source': f'rule:{settled[1]}'}
+                for repo, sha in sorted(unit['keys'])
             )
         else:
             tally['to_judge'] += 1
